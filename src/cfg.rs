@@ -210,40 +210,6 @@ impl Cfg {
         Ok(cfg)
     }
 
-/*     pub fn resource_path(&self, uri: &Uri) -> Result<PathBuf, StatusCode> {
-        log::trace!("Cfg::resource_path( {:?} ) called.", &uri);
-
-        let host = match uri.host() {
-            Some(host) => host,
-            None => match &self.default_host {
-                Some(host) => host.as_str(),
-                None => { return Err(StatusCode::BAD_REQUEST); }
-            }
-        };
-
-        let hcfg = match self.hosts.get(host) {
-            Some(hcfg) => hcfg,
-            None => { return Err(StatusCode::NOT_FOUND); },
-        };
-
-        let mut p = match hcfg.resource_path(uri) {
-            Ok(pbuff) => pbuff,
-            Err(e) => {
-                log::error!(
-                    "Unable to canonicalize {:?}:{}: {}",
-                    host, uri.path(), &e
-                );
-                return Err(StatusCode::NOT_FOUND);
-            },
-        };
-
-        if p.is_dir() {
-            p = p.join(&hcfg.index);
-        }
-
-        Ok(p)
-    } */
-
     pub fn mime_type<'a, P: AsRef<Path>>(&'a self, p: P) -> &'a str {
         let p = p.as_ref();
         if let Some(ext) = p.extension() {

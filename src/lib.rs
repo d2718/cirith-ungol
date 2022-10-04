@@ -39,7 +39,11 @@ pub async fn log_request<B>(req: Request<B>, next: Next<B>) -> Response {
         let scheme = uri.scheme_str().unwrap_or("-schm");
         let authority = uri.authority().map(|a| a.as_str()).unwrap_or("-auth");            // display
         let host = uri.host().unwrap_or("-host");   // &str
-        let port = uri.port_u16().unwrap_or(0);     // u16
+        let port = uri.port();
+        let port_str = match &port {
+            Some(p) => p.as_str(),
+            None => "-p",
+        };
         let path = uri.path();                      // &str
         let query = uri.query().unwrap_or("-q");    // &str
     
@@ -50,7 +54,8 @@ pub async fn log_request<B>(req: Request<B>, next: Next<B>) -> Response {
 
         format!(
             "{} {:?} {} {} {} {} {} {} {}",
-            ci.0.ip(), version, method, scheme, authority, host, port, path, query
+            ci.0.ip(), version, method, scheme, authority,
+            host, port_str, path, query
         )
     };
 

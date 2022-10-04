@@ -26,7 +26,6 @@ use crate::cfg::Host;
 
 const N_BLANK_HEADERS: usize = 64;
 
-
 #[derive(Debug)]
 pub enum RunResult {
     Ok(Response),
@@ -111,7 +110,12 @@ impl CgiCfg {
         // HTTPS
         // TLS_VERSION
         // TLS_CIPHER
-        // PATH
+        match std::env::current_exe() {
+            Ok(path) => { cmd.env("PATH", &path); },
+            Err(e) => { log::error!(
+                "Error detecting current process path: {}", &e
+            ); },
+        }
         if let Some(qstr) = uri.query() {
             cmd.env("QUERY_STRING", qstr);
         }
@@ -122,9 +126,9 @@ impl CgiCfg {
         cmd.env("REQUEST_URI", uri.path());
         cmd.env("SCRIPT_FILENAME", p);
         cmd.env("SCRIPT_NAME", uri.path());
+        cmd.env("SERVER_SOFTWARE", &crate::cfg::server_string());
         // SERVER_NAME
         // SERVER_PORT
-        // SERVER_SOFTWARE
         for (name, value) in req.headers().iter() {
             let var_name: String = format!("http_{}", name)
                 .chars()
