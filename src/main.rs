@@ -11,6 +11,7 @@ use axum::{
     routing::get,
 };
 use simplelog::{ColorChoice, LevelFilter, TermLogger, TerminalMode};
+use tower_http::cors::CorsLayer;
 
 use cirith_ungol::{
     cfg::Cfg,
@@ -18,6 +19,12 @@ use cirith_ungol::{
 };
 
 static DEFAULT_IP: [u8; 4] = [0, 0, 0, 0];
+
+#[cfg(debug_assertions)]
+fn log_level() -> LevelFilter { LevelFilter::Trace }
+
+#[cfg(not(debug_assertions))]
+fn log_level() -> LevelFilter { LevelFilter::Info }
 
 async fn wrapped_main() -> Result<(), Box<dyn Error>> {
     // TODO: Add `clap` and make this a command-line option.
@@ -29,7 +36,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
         .add_filter_allow_str("cirith_ungol")
         .build();
     TermLogger::init(
-        LevelFilter::Trace,
+        log_level(),
         log_cfg,
         TerminalMode::Stdout,
         ColorChoice::Auto,
@@ -41,10 +48,13 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
     let blacklist = cfg.blacklist.take();
     let cfg = Arc::new(cfg);
 
+    let cors = CorsLayer::very_permissive();
+
     let mut router = Router::new()
         .nest("/", get(handler).post(handler))
         .layer(middleware::from_fn(utility_layer))
         .layer(Extension(cfg.clone()))
+        .layer(cors)
         .layer(middleware::from_fn(log_request));
 
     if let Some(blacklist) = blacklist {

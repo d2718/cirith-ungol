@@ -3,11 +3,10 @@ use std::{
     ffi::OsString,
     net::IpAddr,
     path::{Path, PathBuf},
-    //str::FromStr,
     time::Duration,
 };
 
-use axum::http::{status::StatusCode, Uri};
+use axum::http::Uri;
 use axum_server::tls_rustls::RustlsConfig;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
