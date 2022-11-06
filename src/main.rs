@@ -1,103 +1,217 @@
 use std::{
+    convert::Infallible,
     error::Error,
-    net::{SocketAddr, TcpListener},
+    net::SocketAddr,
     sync::Arc,
 };
 
-use axum::{
-    Extension,
-    middleware,
-    Router,
-    routing::get,
+use futures_util::stream::StreamExt;
+use hyper::{
+    Body, header, Request, Response,
+    server::{
+        accept,
+        conn::AddrStream,
+        Server,
+    },
+    service::{make_service_fn, service_fn},
 };
-use simplelog::{ColorChoice, LevelFilter, TermLogger, TerminalMode};
-use tower_http::cors::CorsLayer;
-
-use cirith_ungol::{
-    cfg::Cfg,
-    blacklist_layer, handler, log_request, utility_layer,
+use once_cell::sync::Lazy;
+use tower::{Service, ServiceBuilder};
+use tokio_rustls::server::TlsStream;
+use tower_http::{
+    add_extension::AddExtensionLayer,
+    cors::CorsLayer,
+    set_header::response::SetResponseHeaderLayer,
 };
 
-static DEFAULT_IP: [u8; 4] = [0, 0, 0, 0];
+mod bl;
+mod conf;
+mod host;
+mod mime;
+mod resp;
+mod rlog;
+mod tls;
 
-#[cfg(debug_assertions)]
-fn log_level() -> LevelFilter { LevelFilter::Trace }
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+static SERVER: Lazy<String> = Lazy::new(||
+    format!("Cirith Ungol v{}", VERSION)
+);
+static MIME_TYPES: Lazy<mime::MimeMap> = Lazy::new(||
+    mime::MimeMap::default()
+);
 
-#[cfg(not(debug_assertions))]
-fn log_level() -> LevelFilter { LevelFilter::Info }
+async fn handle(req: Request<Body>) -> Result<Response<Body>, Box<dyn Error + Send + Sync>> {
+    let hosts: &Arc<host::HostConfig> = req.extensions().get()
+        .expect("Host configuration not being injected into requests.");
+    let hosts = hosts.clone();
+    
+    Ok(hosts.handle(req).await)
+}
 
-async fn wrapped_main() -> Result<(), Box<dyn Error>> {
-    // TODO: Add `clap` and make this a command-line option.
-    let mut cfg = Cfg::load("config.toml").await?;
+fn init_logging(level: &str) {
+    use simplelog::{ColorChoice, LevelFilter, TerminalMode};
 
-    // TODO: Add a command-line option or environment variable to set
-    // log level.
+    let level = level.to_ascii_lowercase();
+    let level = match level.as_str() {
+        "max"   => LevelFilter::max(),
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info"  => LevelFilter::Info,
+        "warn"  => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        "off"   => LevelFilter::Off,
+        _       => LevelFilter::Info,
+    };
+
     let log_cfg = simplelog::ConfigBuilder::new()
         .add_filter_allow_str("cirith_ungol")
         .build();
-    TermLogger::init(
-        log_level(),
+
+    if simplelog::TermLogger::init(
+        level,
         log_cfg,
-        TerminalMode::Stdout,
+        TerminalMode::Mixed,
         ColorChoice::Auto,
-    ).unwrap();
-
-    log::info!("Configuration:\n{:#?}", &cfg);
-
-    let tls_cfg = cfg.tls_cfg.take();
-    let blacklist = cfg.blacklist.take();
-    let cfg = Arc::new(cfg);
-
-    let cors = CorsLayer::very_permissive();
-
-    let mut router = Router::new()
-        .nest("/", get(handler).post(handler))
-        .layer(middleware::from_fn(utility_layer))
-        .layer(Extension(cfg.clone()))
-        .layer(cors)
-        .layer(middleware::from_fn(log_request));
-
-    if let Some(blacklist) = blacklist {
-        log::debug!("blacklisting: {:?}", &blacklist);
-        let blacklist = Arc::new(blacklist);
-        router = router.layer(middleware::from_fn(blacklist_layer))
-            .layer(Extension(blacklist.clone()));
+    ).is_err() {
+        log::error!("Logging already started.");
+    } else {
+        log::info!("Logging started @level={:?}", &level);
+        log::info!("{}", &*SERVER);
     }
-    
-    match tls_cfg {
-        Some(tls_cfg) => {
-            let http_addr = SocketAddr::from((DEFAULT_IP, cfg.port));
-            let https_addr = SocketAddr::from((DEFAULT_IP, tls_cfg.port));
-            let http_listener = TcpListener::bind(&http_addr)?;
-            let https_listener = TcpListener::bind(&https_addr)?;
+}
 
-            drop_root::set_user_group(&cfg.user, &cfg.user)?;
+/// Attempt to drop root privileges and become the given user.
+fn drop_to_user(uname: &str) -> Result<(), String> {
+    log::trace!(
+        "drop_to_user( {:?} ) called.", uname
+    );
+
+    drop_root::set_user_group(uname, uname).map_err(|e| format!(
+        "Error dropping root privileges to user {:?}: {}",
+        uname, &e
+    ))
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn wrapped_main() -> Result<(), Box<dyn Error>> {
+    let log_level = match std::env::var("CU_LOG") {
+        Ok(lvl) => lvl.to_ascii_lowercase(),
+        Err(_) => String::from("info"),
+    };
+    init_logging(&log_level);
+
+    let args: Vec<String> = std::env::args().collect();
+    let config_path: &str = &args.get(1)
+        .map(|s| s.as_str())
+        .unwrap_or("config.toml");
+    let cfg = conf::Cfg::from_file(config_path)?;
+
+    let bl_layer = match cfg.blacklist {
+        Some(bl) => {
+            bl::set(bl);
+            Some(bl::BlacklistLayer::new())
+        },
+        None => None
+    };
+
+    let cors_layer = CorsLayer::very_permissive();
+
+    let service = ServiceBuilder::new()
+        .option_layer(bl_layer)
+        .layer(rlog::RLogLayer::new())
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::SERVER,
+            header::HeaderValue::from_str(&SERVER).unwrap(),
+        ))
+        .layer(cors_layer)
+        .layer(AddExtensionLayer::new(Arc::new(cfg.hosts)))
+        .service_fn(handle);
+
+    let make_svc = make_service_fn(|stream: &AddrStream| {
+        let remote_addr = stream.remote_addr();
+        let mut inner_svc = service.clone();
+        let outer_svc = service_fn(move |mut req: Request<Body>| {
+            req.extensions_mut().insert(remote_addr);
+            inner_svc.call(req)
+        });
+
+        async { Ok::<_, Infallible>(outer_svc) }
+    });
+    
+    let tls_make_svc = make_service_fn(|stream: &TlsStream<AddrStream>| {
+        let (io, _) = stream.get_ref();
+        let remote_addr = io.remote_addr();
+        let mut inner_svc = service.clone();
+        let outer_svc = service_fn(move |mut req: Request<Body>| {
+            req.extensions_mut().insert(remote_addr);
+            inner_svc.call(req)
+        });
+
+        async { Ok::<_, Infallible>(outer_svc) }
+    });
+
+    match (cfg.port, cfg.https_config) {
+        (Some(port), Some((listener, tls_addr))) => {
+            log::info!("Serving HTTP on port {}", &port);
+            log::info!("Serving HTTPS on port {}", &tls_addr);
+
+            let addr = SocketAddr::from(([0, 0, 0, 0,], port));
+            let listener = listener.filter(|conn| {
+                if let Err(e) = conn {
+                    log::error!("TLS connection error: {}", &e);
+                    std::future::ready(false)
+                } else {
+                    std::future::ready(true)
+                }
+            });
+
+            let http_server = Server::bind(&addr);
+            let https_server = Server::builder(accept::from_stream(listener));
+            drop_to_user(&cfg.user)?;
 
             tokio::try_join!(
-                axum_server::from_tcp(http_listener).serve(
-                    router.clone().into_make_service_with_connect_info::<SocketAddr>()
-                ),
-                axum_server::from_tcp_rustls(https_listener, tls_cfg.tls).serve(
-                    router.into_make_service_with_connect_info::<SocketAddr>()
-                )
+                http_server.serve(make_svc),
+                https_server.serve(tls_make_svc),
             )?;
         },
-        None => {
-            let http_addr = SocketAddr::from((DEFAULT_IP, cfg.port));
-            let http_listener = TcpListener::bind(&http_addr)?;
-            axum_server::from_tcp(http_listener).serve(
-                router.clone().into_make_service_with_connect_info::<SocketAddr>()
-            ).await?;
+        (Some(port), None) => {
+            log::info!("Serving HTTP on port {}", &port);
+
+            let addr = SocketAddr::from(([0, 0, 0, 0], port));
+            let http_server = Server::bind(&addr);
+            drop_to_user(&cfg.user)?;
+            
+            http_server.serve(make_svc).await?;
+        },
+        (None, Some((listener, tls_addr))) => {
+            log::info!("Serving HTTPS on port {}", &tls_addr);
+
+            let listener = listener.filter(|conn| {
+                if let Err(e) = conn {
+                    log::error!("TLS connection error: {}", &e);
+                    std::future::ready(false)
+                } else {
+                    std::future::ready(true)
+                }
+            });
+            let https_server = Server::builder(accept::from_stream(listener));
+            drop_to_user(&cfg.user)?;
+
+            https_server.serve(tls_make_svc).await?;
+        },
+        (None, None) => {
+            return Err(
+                "This is pointless.".into()
+            );
         },
     }
 
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if let Err(e) = wrapped_main().await {
-        println!("{}", &e);
+fn main() {
+    if let Err(e) = wrapped_main() {
+        eprintln!("{}", &e);
         std::process::exit(1);
     }
 }
