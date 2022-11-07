@@ -31,12 +31,6 @@ pub struct BlacklistService<S> {
     inner: S
 }
 
-impl<S> BlacklistService<S> {
-    pub fn new(inner: S) -> Self {
-        Self { inner }
-    }
-}
-
 #[pin_project(project = BlFutProj)]
 pub enum BlacklistFuture<F> {
     Ok(#[pin] F),

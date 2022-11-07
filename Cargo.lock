@@ -52,6 +52,7 @@ dependencies = [
  "futures-util",
  "httparse",
  "hyper",
+ "libc",
  "log",
  "once_cell",
  "pin-project",

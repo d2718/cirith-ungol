@@ -28,6 +28,7 @@ mod bl;
 mod conf;
 mod host;
 mod mime;
+mod rate;
 mod resp;
 mod rlog;
 mod tls;
@@ -81,15 +82,25 @@ fn init_logging(level: &str) {
 }
 
 /// Attempt to drop root privileges and become the given user.
-fn drop_to_user(uname: &str) -> Result<(), String> {
+fn drop_to_user(uname: Option<&str>) -> Result<(), String> {
     log::trace!(
         "drop_to_user( {:?} ) called.", uname
     );
 
-    drop_root::set_user_group(uname, uname).map_err(|e| format!(
-        "Error dropping root privileges to user {:?}: {}",
-        uname, &e
-    ))
+    if let Some(uname) = uname {
+        let uid = unsafe { libc::getuid() };
+        if uid != 0 {
+            return Err(format!(
+                "Root priviliges required to drop to user {:?}.", uname
+            ));
+        }
+        drop_root::set_user_group(uname, uname).map_err(|e| format!(
+            "Error dropping root privileges to user {:?}: {}",
+            uname, &e
+        ))?;
+    }
+
+    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -114,10 +125,17 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
         None => None
     };
 
+    let limit_layer = match cfg.rate_config {
+        Some((n_reqs, window, interval)) =>
+            Some(rate::RateLimitLayer::new(n_reqs, window, interval)?),
+        None => None,
+    };
+
     let cors_layer = CorsLayer::very_permissive();
 
     let service = ServiceBuilder::new()
         .option_layer(bl_layer)
+        .option_layer(limit_layer)
         .layer(rlog::RLogLayer::new())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::SERVER,
@@ -167,7 +185,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
 
             let http_server = Server::bind(&addr);
             let https_server = Server::builder(accept::from_stream(listener));
-            drop_to_user(&cfg.user)?;
+            drop_to_user(cfg.user.as_deref())?;
 
             tokio::try_join!(
                 http_server.serve(make_svc),
@@ -179,7 +197,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
 
             let addr = SocketAddr::from(([0, 0, 0, 0], port));
             let http_server = Server::bind(&addr);
-            drop_to_user(&cfg.user)?;
+            drop_to_user(cfg.user.as_deref())?;
             
             http_server.serve(make_svc).await?;
         },
@@ -195,7 +213,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
                 }
             });
             let https_server = Server::builder(accept::from_stream(listener));
-            drop_to_user(&cfg.user)?;
+            drop_to_user(cfg.user.as_deref())?;
 
             https_server.serve(tls_make_svc).await?;
         },

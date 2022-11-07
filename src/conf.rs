@@ -4,6 +4,7 @@ use std::{
     collections::BTreeSet,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use hyper::server::conn::AddrIncoming;
@@ -25,7 +26,7 @@ struct HostCfg {
 
 #[derive(Debug, Deserialize)]
 struct CfgFile {
-    user: String,
+    user: Option<String>,
     host: Vec<HostCfg>,
     default_host: Option<String>,
     blacklist: Option<Vec<IpAddr>>,
@@ -34,24 +35,30 @@ struct CfgFile {
     no_http: Option<bool>,
     ssl_cert: Option<PathBuf>,
     ssl_key: Option<PathBuf>,
+    rate_request_limit: Option<usize>,
+    rate_window_ms: Option<u64>,
+    rate_prune_interval: Option<usize>,
+    no_rate_limit: Option<bool>,
 }
 
 pub struct Cfg {
-    pub user: String,
+    pub user: Option<String>,
     pub hosts: HostConfig,
     pub blacklist: Option<BTreeSet<IpAddr>>,
     pub port: Option<u16>,
     pub https_config: Option<(TlsListener<AddrIncoming, TlsAcceptor>, SocketAddr)>,
+    pub rate_config: Option<(usize, Duration, usize)>,
 }
 
 impl Default for Cfg {
     fn default() -> Self {
         Self {
-            user: String::new(),
+            user: None,
             hosts: HostConfig::empty(),
             blacklist: None,
             port: Some(80),
             https_config: None,
+            rate_config: None,
         }
     }
 }
@@ -142,6 +149,47 @@ impl Cfg {
             cfg.port = None;
         } else {
             cfg.port = Some(cf.http_port.unwrap_or(80));
+        }
+
+        let mut rate_request_limit: usize = 10;
+        let mut rate_window = Duration::from_millis(10 * 1000);
+        let mut rate_prune_interval: usize = 1024;
+        let mut no_rate_limit: bool = false;
+
+        if let Some(b) = cf.no_rate_limit {
+            no_rate_limit = b;
+        }
+
+        if let Some(x) = cf.rate_request_limit {
+            if no_rate_limit {
+                log::warn!("no_rate_limit set; ignoring rate_request_limit value of {}.", &x);
+            } else {
+                rate_request_limit = x;
+            }
+        }
+
+        if let Some(x) = cf.rate_window_ms {
+            if no_rate_limit {
+                log::warn!("no_rate_limit set; ignoring rate_window_ms value of {}", &x);
+            } else {
+                rate_window = Duration::from_millis(x);
+            }
+        }
+
+        if let Some(x) =  cf.rate_prune_interval {
+            if no_rate_limit {
+                log::warn!("no_rate_limit set; ignoring rate_prune interval value of {}", &x);
+            } else {
+                rate_prune_interval = x;
+            }
+        }
+
+        if !no_rate_limit {
+            cfg.rate_config = Some((
+                rate_request_limit,
+                rate_window,
+                rate_prune_interval
+            ));
         }
 
         Ok(cfg)

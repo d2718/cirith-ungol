@@ -1,18 +1,23 @@
 # cirith-ungol
 Simple, single-threaded web server using
-[`axum`](https://github.com/tokio-rs/axum).
+[`hyper`](https://github.com/hyperium/hyper) and
+[`tower`](https://github.com/tower-rs/tower).
 
-This is an initial working version that has the following basic features:
+The current working version has the following basic features:
 
   * serves static files
   * HTTP and HTTPS
   * runs CGI programs in response to both `GET` and `POST` requests
   * configurable blacklist
   * request logging
+  * per-IP request rate limiting
   * very permissive CORS layer
 
 The target use case of this software is serving small or personal websites
-from virtual machines.
+from virtual machines. The main goal is simple configuration; it's useable
+out of the box with very few configuration options.
+
+## From Zero to Sixty
 
 ### Build
 
@@ -68,16 +73,16 @@ blacklist = [
 # actual domain name that points to your site.
 
 [[host]]
-name = "default"
-root = "/home/you/fake_webroot"
-
-[[host]]
 # Domain name of your site.
 name = "yourdomain.com"
 # Local directory where the root URI of your domain should point.
 root = "/home/you/webroot"
 # List of local directories whose contents will be treated as CGI scripts.
-cgi = ["/home/you/webrot/cgi-bin"]
+cgi = ["/home/you/webroot/cgi-bin"]
+
+[[host]]
+name = "default"
+root = "/home/you/fake_webroot"
 
 ```
 
@@ -107,14 +112,24 @@ sudo nohup cirith-ungol >run.log &
   * Make logging optional.
   * more command line arguments (and maybe look for config file in a few
     common places)
-  * request rate limiting
-  * maybe per-IP rate limiting
+  * ~~request rate limiting~~
+  * ~~maybe per-IP rate limiting~~
   * directory autoindexing
   * ETags
   * ~~CORS layer (pretty sure this is just a matter of adding an existing
     [`tower`](https://github.com/tower-rs/tower) Service)~~
   * configurable CORS layer (it is, in fact, a pretty simple `tower` layer)
+  * custom error pages?
   * more complete set of environment variables passed through CGI
   * custom MIME type configuration
+  * streaming response bodies
   * Squash a bunch of the `tower::Layer`s together into a single layer to
     reduce async runtime complexity.
+
+## Goals
+
+Cirith Ungol aims to be simple to configure and relatively lightweight by
+targeting a specifc use case: A general purpose web server for serving static
+files and running CGI scripts from a small virtual machine, like a t2.micro or
+Google's e2-micro. It's intended for personal or experimental low-traffic
+websites. 
