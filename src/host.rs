@@ -364,6 +364,7 @@ impl Host {
     }
 }
 
+#[derive(Debug)]
 pub struct HostConfig {
     hosts: BTreeMap<String, Host>,
     default: Option<Host>,
@@ -437,7 +438,7 @@ impl HostConfig {
 
     fn get_host<'a>(&'a self, hostname: &str) -> Option<&'a Host> {
         log::trace!(
-            "HostConfig[{} hosts]::match( {:?} ) called.",
+            "HostConfig[{} hosts]::get_host( {:?} ) called.",
             &self.hosts.len(), hostname
         );
 
@@ -452,10 +453,14 @@ impl HostConfig {
             "HostConfig[{} Hosts]::handle( {} {} )",
             &self.hosts.len(), req.method(), req.uri()
         );
+        dbg_log(req.uri());
+        log::debug!(
+            "Request Headers:\n{:#?}", req.headers()
+        );
 
-        let hostname = match req.uri().host() {
-            Some(name) => name,
-            None => "",
+        let hostname = match req.headers().get("host").map(HeaderValue::to_str) {
+            Some(Ok(name)) => name,
+            _ => "",
         };
 
         match self.get_host(hostname) {
@@ -463,4 +468,21 @@ impl HostConfig {
             None => canned_html_response(404),
         }
     }
+}
+
+fn dbg_log(uri: &Uri) {
+    log::debug!(
+        "URI: {:?}
+    schm: {:?}
+    auth: {:?}
+    host: {:?}
+    path: {:?}
+     qry: {:?}",
+        uri,
+        uri.scheme(),
+        uri.authority(),
+        uri.host(),
+        uri.path(),
+        uri.query(),
+    );
 }

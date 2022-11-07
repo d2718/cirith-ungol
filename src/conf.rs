@@ -15,6 +15,10 @@ use tokio_rustls::TlsAcceptor;
 use crate::host::{Host, HostConfig};
 use crate::tls;
 
+const DEFAULT_REQUEST_LIMIT: usize = 24;
+const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(4);
+const DEFAULT_PRUNE_INTERVAL: usize = 1024;
+
 #[derive(Debug, Deserialize)]
 struct HostCfg {
     name: String,
@@ -151,9 +155,9 @@ impl Cfg {
             cfg.port = Some(cf.http_port.unwrap_or(80));
         }
 
-        let mut rate_request_limit: usize = 10;
-        let mut rate_window = Duration::from_millis(10 * 1000);
-        let mut rate_prune_interval: usize = 1024;
+        let mut rate_request_limit = DEFAULT_REQUEST_LIMIT;
+        let mut rate_window = DEFAULT_RATE_WINDOW;
+        let mut rate_prune_interval = DEFAULT_PRUNE_INTERVAL;
         let mut no_rate_limit: bool = false;
 
         if let Some(b) = cf.no_rate_limit {

@@ -133,6 +133,10 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
 
     let cors_layer = CorsLayer::very_permissive();
 
+    log::debug!(
+        "Host configuration:\n{:#?}", &cfg.hosts
+    );
+
     let service = ServiceBuilder::new()
         .option_layer(bl_layer)
         .option_layer(limit_layer)
