@@ -14,7 +14,11 @@ use std::{
 use hyper::{body, Body,
     header,
     header::{HeaderName, HeaderValue},
-    Method, Request, Uri, Response
+    Method, Request, Uri, Response, StatusCode,
+};
+use time::{
+    OffsetDateTime,
+    format_description::well_known::Rfc2822,
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -23,7 +27,7 @@ use tokio::{
 
 use crate::{
     MIME_TYPES,
-    resp::canned_html_response,
+    resp::{canned_html_response, header_only},
     SERVER,
 };
 
@@ -66,6 +70,27 @@ fn responsify(bytes: &[u8]) -> Result<Response<Body>, String> {
     }
 
     Ok(resp)
+}
+
+fn to_header_value(odt: OffsetDateTime) -> Option<HeaderValue> {
+    log::trace!("to_header_value( {:?} ) called.", &odt);
+
+    match odt.format(&Rfc2822) {
+        Ok(tstamp) => {
+            return match HeaderValue::try_from(tstamp) {
+                Ok(hv) => Some(hv),
+                Err(e) => {
+                    log::error!("Error converting timestamp to HeaderValue: {}", &e);
+                    None
+                },
+            };
+        },
+        Err(e) => {
+            log::error!("Error formatting OffsetDateTime: {}", &e);
+        },
+    }
+
+    None
 }
 
 #[derive(Debug)]
@@ -300,9 +325,20 @@ impl Host {
             },
         };
 
-        if !local_path.exists() {
-            return canned_html_response(404);
-        }
+        let metadata = match std::fs::metadata(&local_path) {
+            Ok(md) => md,
+            Err(e) => match e.kind() {
+                ErrorKind::NotFound => {
+                    return canned_html_response(404);
+                },
+                ErrorKind::PermissionDenied => {
+                    return canned_html_response(403);
+                },
+                _ => {
+                    return canned_html_response(500);
+                },
+            }
+        };
 
         if let Some(cgi_dirs) = &self.cgi_dirs {
             if let Some(p) = local_path.parent() {
@@ -315,6 +351,31 @@ impl Host {
         if req.method() != Method::GET {
             return canned_html_response(405);
         }
+
+        let last_modified = match metadata.modified() {
+            Ok(systime) => {
+                let local_time = OffsetDateTime::from(systime);
+                if let Some(hval) = req.headers().get(header::IF_MODIFIED_SINCE) {
+                    if let Ok(hval_str) = hval.to_str() {
+                        match OffsetDateTime::parse(hval_str, &Rfc2822) {
+                            Ok(remote_time) => {
+                                if local_time <= remote_time {
+                                    return header_only(StatusCode::NOT_MODIFIED, vec![]);
+                                }
+                            },
+                            Err(e) => {
+                                log::error!(
+                                    "Unable to parse header value time {:?}: {}",
+                                    hval_str, &e
+                                );
+                            }
+                        }
+                    }
+                }
+                to_header_value(local_time)
+            },
+            _ => None,
+        };
 
         let content_type = match local_path.extension() {
             Some(ext) => {
@@ -338,7 +399,7 @@ impl Host {
                 let content_length = bytes.len();
                 let bod = Body::from(bytes);
 
-                match Response::builder()
+                let mut resp = match Response::builder()
                     .status(200)
                     .header(
                         header::CONTENT_TYPE,
@@ -351,9 +412,19 @@ impl Host {
                     Ok(resp) => resp,
                     Err(e) => {
                         log::error!("Error generating response: {}", &e);
-                        canned_html_response(500)
+                        return canned_html_response(500);
                     },
+                };
+
+                if let Some(modded) = last_modified {
+                    dbg!(&modded);
+                    resp.headers_mut().insert(
+                        header::LAST_MODIFIED,
+                        modded
+                    );
                 }
+
+                resp
             },
             Err(e) => match e.kind() {
                 ErrorKind::NotFound => canned_html_response(404),

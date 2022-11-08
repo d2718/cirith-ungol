@@ -1,6 +1,6 @@
 [package]
 name = "cirith-ungol"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -17,6 +17,7 @@ pin-project = "^1.0"
 rustls-pemfile = "^1.0"
 serde = { version = "^1.0", features = ["derive"] }
 simplelog = "^0.12"
+time = { version = "^0.3", features = ["formatting", "macros", "parsing"] }
 tls-listener = { version = "^0.5", features = ["hyper-h1", "hyper-h2", "rustls"] }
 tokio-rustls = "^0.23"
 tokio = { version = "^1.2", features = ["fs", "macros", "net", "process", "rt"] }

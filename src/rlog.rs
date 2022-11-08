@@ -40,6 +40,7 @@ where
         match this.response_future.poll(cx) {
             Poll::Ready(result) => match result {
                 Ok(resp) => {
+                    log::debug!("{:#?}", resp.headers());
                     log::info!("{} {}", resp.status().as_str(), &this.data);
                     Poll::Ready(Ok(resp))
                 },

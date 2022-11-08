@@ -109,7 +109,10 @@ sudo nohup cirith-ungol >run.log &
 
 ## To Do
 
-  * Make logging optional.
+  * ~~Make logging optional.~~ Logging can now be controlled by setting
+    the `CU_LOG` environment variable to one of the following values:
+    `max`, `trace`, `debug`, `info`, `warn`, `error`, `off`. The default
+    level is `info`; `max` is equivalent to `trace`.
   * more command line arguments (and maybe look for config file in a few
     common places)
   * ~~request rate limiting~~
@@ -132,4 +135,4 @@ Cirith Ungol aims to be simple to configure and relatively lightweight by
 targeting a specifc use case: A general purpose web server for serving static
 files and running CGI scripts from a small virtual machine, like a t2.micro or
 Google's e2-micro. It's intended for personal or experimental low-traffic
-websites. 
+websites.

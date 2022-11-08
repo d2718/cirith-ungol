@@ -5,7 +5,7 @@ use std::{
 
 use hyper::{
     Body, header, Response, StatusCode,
-    header::HeaderValue,
+    header::{HeaderName, HeaderValue},
 };
 
 static HEAD: &str = include_str!("response_files/head.html");
@@ -47,14 +47,14 @@ static R_500: (&str, &str) = (
 
 pub fn canned_html_response<S>(code: S) -> Response<Body>
 where
-    S: TryInto<StatusCode> + Debug
+    S: TryInto<StatusCode> + Debug + Copy
 {
     log::trace!("canned_html_response( {:?} ) called.", &code);
 
     let mut code: StatusCode = match code.try_into() {
         Ok(code) => code,
         Err(_) => {
-            log::error!("Unable to convert to StatusCode.");
+            log::error!("Unable to convert to StatusCode: {:?}", &code);
             StatusCode::INTERNAL_SERVER_ERROR
         },
     };
@@ -93,4 +93,36 @@ where
             HeaderValue::try_from(format!("{}", response_length)).unwrap(),
         )
         .body(Body::from(v)).unwrap()
+}
+
+pub fn header_only<S>(
+    code: S,
+    mut addl_headers: Vec<(HeaderName, HeaderValue)>
+) -> Response<Body>
+where
+    S: TryInto<StatusCode> + Debug + Copy
+{
+    log::trace!(
+        "header_only( {:?}, [ {} add'l headers ] ) called.",
+        &code, addl_headers.len()
+    );
+
+    let code: StatusCode = match code.try_into() {
+        Ok(code) => code,
+        Err(_) => {
+            log::error!("Unable to convert StatusCode: {:?}", &code);
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+    };
+
+    let mut resp = Response::builder()
+        .status(code)
+        .body(Body::empty())
+        .unwrap();
+    
+    for (name, val) in addl_headers.drain(..) {
+        resp.headers_mut().insert(name, val);
+    }
+
+    resp
 }
