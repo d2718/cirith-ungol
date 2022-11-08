@@ -4,11 +4,13 @@ Individually configured hosts.
 use std::{
     collections::{BTreeSet, BTreeMap},
     ffi::OsStr,
-    io::ErrorKind,
+    fs::Metadata,
+    io::{ErrorKind, Write},
     net::SocketAddr,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::Stdio,
+    time::SystemTime,
 };
 
 use hyper::{body, Body,
@@ -16,6 +18,7 @@ use hyper::{body, Body,
     header::{HeaderName, HeaderValue},
     Method, Request, Uri, Response, StatusCode,
 };
+use smallvec::SmallVec;
 use time::{
     OffsetDateTime,
     format_description::well_known::Rfc2822,
@@ -92,6 +95,118 @@ fn to_header_value(odt: OffsetDateTime) -> Option<HeaderValue> {
 
     None
 }
+
+/// Values of the `Etag` and `Last-Modified` headers.
+///
+/// (For reducing bandwidth used.)
+#[derive(Debug, Eq, PartialEq)]
+struct BandwidthHeaders {
+    etag: HeaderValue,
+    modified: HeaderValue,
+}
+
+/// A bandwidth reduction action to take.
+///
+/// Depends on presence and values of request headers and the modification
+/// time of the file resource requested.
+#[derive(Debug, Eq, PartialEq)]
+enum Bandwidth {
+    /// Resource not modified since last retrieval (send 304).
+    NotModified,
+    /// Resource new or modified since last retrieval, send `ETag` and
+    /// `Last-Modified` headers along with resource.
+    Modified(BandwidthHeaders),
+    /// Last-modified time undiscernable, just send the resource.
+    Unknown,
+}
+
+impl Bandwidth {
+    /**
+    Determine whether the requested resource needs to be sent, and the values
+    of the bandwidth-saving headers to send with it if so.
+    */
+    fn check(md: &Metadata, req: &Request<Body>) -> Bandwidth {
+        log::trace!(
+            "Bandwidth::check( [ Metadata ], {:?} ) called.",
+            req.uri()
+        );
+        let (since_epoch, last_modified) = match md.modified() {
+            Ok(systime) => match systime.duration_since(SystemTime::UNIX_EPOCH) {
+                Ok(dur) => (dur, systime),
+                Err(e) => {
+                    log::error!(
+                        "Last modified time {:?} before epoch: {}",
+                        &systime, &e
+                    );
+                    return Bandwidth::Unknown;
+                },
+            },
+            Err(_) => { return Bandwidth::Unknown; }
+        };
+
+        let etag = {
+            let nanos = (since_epoch.subsec_nanos() as u64) << 32;
+            let n = since_epoch.as_secs() | nanos;
+            let mut bytes = SmallVec::<[u8; 20]>::new();
+            if let Err(e) = write!(&mut bytes, "\"{:x}\"", n) {
+                log::error!("Error formatting Etag {:x}: {}", n, &e);
+                return Bandwidth::Unknown;
+            }
+            match HeaderValue::try_from(bytes.as_slice()) {
+                Ok(val) => val,
+                Err(e) => {
+                    log::error!(
+                        "Error headerizing Etag value {:?}: {}",
+                        &bytes, &e
+                    );
+                    return Bandwidth::Unknown;
+                },
+            }
+        };
+
+        if let Some(val) = req.headers().get(header::IF_NONE_MATCH) {
+            if val == etag {
+                return Bandwidth::NotModified;
+            }
+        }
+
+        let last_modified = OffsetDateTime::from(last_modified);
+
+        if let Some(val) = req.headers().get(header::IF_MODIFIED_SINCE) {
+            if let Ok(val) = val.to_str() {
+                if let Ok(last) = OffsetDateTime::parse(val, &Rfc2822) {
+                    if last_modified <= last {
+                        return Bandwidth::NotModified;
+                    }
+                }
+            }
+        }
+
+        let modified = {
+            let mut bytes = SmallVec::<[u8; 36]>::new();
+            if let Err(e) = last_modified.format_into(&mut bytes, &Rfc2822) {
+                log::error!(
+                    "Error formatting last modified date {:?}: {}",
+                    &last_modified, &e
+                );
+                return Bandwidth::Unknown;
+            }
+            match HeaderValue::try_from(bytes.as_slice()) {
+                Ok(val) => val,
+                Err(e) => {
+                    log::error!(
+                        "Error headerizing last modified date {:?}: {}",
+                        &last_modified, &e
+                    );
+                    return Bandwidth::Unknown;
+                }
+            }
+        };
+
+        let bw_headers = BandwidthHeaders { etag, modified };
+        Bandwidth::Modified(bw_headers)
+    }
+ }
 
 #[derive(Debug)]
 enum Index {
@@ -352,30 +467,10 @@ impl Host {
             return canned_html_response(405);
         }
 
-        let last_modified = match metadata.modified() {
-            Ok(systime) => {
-                let local_time = OffsetDateTime::from(systime);
-                if let Some(hval) = req.headers().get(header::IF_MODIFIED_SINCE) {
-                    if let Ok(hval_str) = hval.to_str() {
-                        match OffsetDateTime::parse(hval_str, &Rfc2822) {
-                            Ok(remote_time) => {
-                                if local_time <= remote_time {
-                                    return header_only(StatusCode::NOT_MODIFIED, vec![]);
-                                }
-                            },
-                            Err(e) => {
-                                log::error!(
-                                    "Unable to parse header value time {:?}: {}",
-                                    hval_str, &e
-                                );
-                            }
-                        }
-                    }
-                }
-                to_header_value(local_time)
-            },
-            _ => None,
-        };
+        let bandwidth = Bandwidth::check(&metadata, &req);
+        if &Bandwidth::NotModified == &bandwidth {
+            return header_only(304, vec![]);
+        }
 
         let content_type = match local_path.extension() {
             Some(ext) => {
@@ -416,11 +511,14 @@ impl Host {
                     },
                 };
 
-                if let Some(modded) = last_modified {
-                    dbg!(&modded);
+                if let Bandwidth::Modified(bw_heads) = bandwidth {
+                    resp.headers_mut().insert(
+                        header::ETAG,
+                        bw_heads.etag,
+                    );
                     resp.headers_mut().insert(
                         header::LAST_MODIFIED,
-                        modded
+                        bw_heads.modified,
                     );
                 }
 
@@ -524,10 +622,10 @@ impl HostConfig {
             "HostConfig[{} Hosts]::handle( {} {} )",
             &self.hosts.len(), req.method(), req.uri()
         );
-        dbg_log(req.uri());
+/*         dbg_log(req.uri());
         log::debug!(
             "Request Headers:\n{:#?}", req.headers()
-        );
+        ); */
 
         let hostname = match req.headers().get("host").map(HeaderValue::to_str) {
             Some(Ok(name)) => name,
@@ -541,7 +639,7 @@ impl HostConfig {
     }
 }
 
-fn dbg_log(uri: &Uri) {
+/* fn dbg_log(uri: &Uri) {
     log::debug!(
         "URI: {:?}
     schm: {:?}
@@ -556,4 +654,4 @@ fn dbg_log(uri: &Uri) {
         uri.path(),
         uri.query(),
     );
-}
+} */

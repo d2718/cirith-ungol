@@ -46,7 +46,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "cirith-ungol"
-version = "0.3.1"
+version = "0.3.3"
 dependencies = [
  "drop-root",
  "futures-util",
@@ -59,6 +59,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "simplelog",
+ "smallvec",
  "time",
  "tls-listener",
  "tokio",
@@ -442,6 +443,12 @@ checksum = "4614a76b2a8be0058caa9dbbaf66d988527d86d003c11a94fbd335d7661edcef"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "smallvec"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a507befe795404456341dfab10cef66ead4c041f62b8b11bbb92bffe5d0953e0"
 
 [[package]]
 name = "socket2"

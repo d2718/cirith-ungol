@@ -118,7 +118,8 @@ sudo nohup cirith-ungol >run.log &
   * ~~request rate limiting~~
   * ~~maybe per-IP rate limiting~~
   * directory autoindexing
-  * ETags
+  * ~~ETags~~ Also serves `Last-Modified` header, and responds appropriately
+    to requests with `If-None-Match` and `If-Modified-Since` headers.
   * ~~CORS layer (pretty sure this is just a matter of adding an existing
     [`tower`](https://github.com/tower-rs/tower) Service)~~
   * configurable CORS layer (it is, in fact, a pretty simple `tower` layer)
