@@ -1,18 +1,35 @@
 use std::{
     fmt::Debug,
+    fs::DirEntry,
     io::Write,
+    os::unix::ffi::OsStrExt,
+    path::Path,
+    time::SystemTime,
 };
 
 use hyper::{
     Body, header, Response, StatusCode,
     header::{HeaderName, HeaderValue},
 };
+use time::{
+    format_description::FormatItem,
+    macros::format_description,
+    OffsetDateTime,
+};
 
-static HEAD: &str = include_str!("response_files/head.html");
-static MIDDLE: &str = include_str!("response_files/middle.html");
-static FOOT: &str = include_str!("response_files/foot.html");
+static CANNED_HEAD:   &str = include_str!("response_files/canned_head.html");
+static CANNED_MIDDLE: &str = include_str!("response_files/canned_middle.html");
+static CANNED_FOOT:   &str = include_str!("response_files/canned_foot.html");
+static CANNED_BASE_RESPONSE_LEN: usize = CANNED_HEAD.len() + CANNED_MIDDLE.len() + CANNED_FOOT.len();
 
-static BASE_RESPONSE_LEN: usize = HEAD.len() + MIDDLE.len() + FOOT.len();
+static INDEX_HEAD:   &str = include_str!("response_files/autoindex_head.html");
+static INDEX_MIDDLE: &str = include_str!("response_files/autoindex_middle.html");
+static INDEX_FOOT:   &str = include_str!("response_files/autoindex_foot.html");
+//static INDEX_BASE_RESPONSE_LEN: usize = INDEX_HEAD.len() + INDEX_MIDDLE.len() + INDEX_FOOT.len();
+
+static INDEX_TIME_FMT: &[FormatItem] = format_description!(
+    "[year]-[month]-[day] [hour]:[minute]:[second]"
+);
 
 static R_403: (&str, &str) = (
     "Forbidden (403)",
@@ -73,14 +90,14 @@ where
         },
     };
 
-    let response_length = BASE_RESPONSE_LEN + title.len() + contents.len();
+    let response_length = CANNED_BASE_RESPONSE_LEN + title.len() + contents.len();
     let mut v: Vec<u8> = Vec::with_capacity(response_length);
 
-    v.write_all(HEAD.as_bytes()).unwrap();
+    v.write_all(CANNED_HEAD.as_bytes()).unwrap();
     v.write_all(title.as_bytes()).unwrap();
-    v.write_all(MIDDLE.as_bytes()).unwrap();
+    v.write_all(CANNED_MIDDLE.as_bytes()).unwrap();
     v.write_all(contents.as_bytes()).unwrap();
-    v.write_all(FOOT.as_bytes()).unwrap();
+    v.write_all(CANNED_FOOT.as_bytes()).unwrap();
 
     Response::builder()
         .status(code)
@@ -90,7 +107,7 @@ where
         )
         .header(
             header::CONTENT_LENGTH,
-            HeaderValue::try_from(format!("{}", response_length)).unwrap(),
+            HeaderValue::from(response_length),
         )
         .body(Body::from(v)).unwrap()
 }
@@ -125,4 +142,189 @@ where
     }
 
     resp
+}
+
+
+
+fn write_dir_metadata<W, N, C, E>(
+    mut w: W,
+    modified: Result<SystemTime, E>,
+    utf8name: N,
+    encoded_name: C
+) -> std::io::Result<()>
+where
+    W: Write,
+    N: AsRef<str>,
+    C: AsRef<str>,
+{
+    use time::error::Format;
+
+    let name = utf8name.as_ref();
+    let encd = encoded_name.as_ref();
+
+    writeln!(w, "<tr>\n    <td></td>\n    <td>")?;
+    if let Ok(systime) = modified {
+        let odt = OffsetDateTime::from(systime);
+        odt.format_into(&mut w, INDEX_TIME_FMT).map_err(|e| match e {
+            Format::StdIo(e) => e,
+            _ => { panic!("This formatting error shouldn't happen."); },
+        })?;
+    }
+    writeln!(
+        w, "</td>\n    <td><a href=\"{}/\">{}/</a></td>\n</tr>",
+        encd, name
+    )
+}
+
+fn write_file_metadata<W, N, C, E>(
+    mut w: W,
+    size: u64,
+    modified: Result<SystemTime, E>,
+    utf8name: N,
+    encoded_name: C
+) -> std::io::Result<()>
+where
+    W: Write,
+    N: AsRef<str>,
+    C: AsRef<str>,
+{
+    use time::error::Format;
+    
+    let name = utf8name.as_ref();
+    let encd = encoded_name.as_ref();
+
+    writeln!(w, "<tr>\n    <td>{}</td>\n    <td>", size)?;
+    if let Ok(systime) = modified {
+        let odt = OffsetDateTime::from(systime);
+        odt.format_into(&mut w, INDEX_TIME_FMT).map_err(|e| match e {
+            Format::StdIo(e) => e,
+            _ => { panic!("This formatting error shouldn't happen."); },
+        })?;
+    }
+    writeln!(
+        w, "</td>\n    <td><a href=\"{}\">{}</a></td>\n</tr>",
+        encd, name
+    )
+}
+
+fn write_metadata<W>(w: W, entry: DirEntry) -> std::io::Result<()>
+where
+    W: Write,
+{
+    let metadata = entry.metadata()?;
+    let name = entry.file_name();
+    let utf8name = String::from_utf8_lossy(name.as_bytes());
+    let encoded_name = urlencoding::encode_binary(name.as_bytes());
+    let ftype = metadata.file_type();
+
+    if ftype.is_file() {
+        write_file_metadata(w,
+            metadata.len(),
+            metadata.modified(),
+            utf8name,
+            encoded_name
+        )?;
+    } else if ftype.is_dir() {
+        write_dir_metadata(w,
+            metadata.modified(),
+            utf8name,
+            encoded_name
+        )?;
+    }
+    // If it's anything else, don't write about it.
+
+    Ok(())
+}
+
+fn write_index(
+    uri_path: &str,
+    p: &Path
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut v: Vec<u8> = Vec::new();
+    v.write_all(INDEX_HEAD.as_bytes())?;
+    v.write_all(uri_path.as_bytes())?;
+    v.write_all(INDEX_MIDDLE.as_bytes())?;
+
+    for res in std::fs::read_dir(p)? {
+        write_metadata(&mut v, res?)?;
+    }
+
+    v.write_all(INDEX_FOOT.as_bytes())?;
+    Ok(v)
+}
+
+pub fn index<P>(
+    uri_path: &str,
+    local_path: P,
+    mut addl_headers: Vec<(HeaderName, HeaderValue)>,
+) -> Response<Body>
+where
+    P: AsRef<Path>
+{
+    let p = local_path.as_ref();
+    log::trace!(
+        "index( {}, [ {} add'l headers ] ) called.",
+        p.display(), addl_headers.len()
+    );
+
+    if uri_path.as_bytes().last() != Some(&b'/') {
+        let mut new_path = String::from(uri_path);
+        new_path.push('/');
+        let new_path = match HeaderValue::try_from(new_path) {
+            Ok(val) => val,
+            Err(e) => {
+                log::error!(
+                    "Error turning new path into HeaderValue: {}", &e
+                );
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+        };
+        return header_only(
+            StatusCode::MOVED_PERMANENTLY,
+            vec![
+                (
+                    header::LOCATION,
+                    new_path
+                )
+            ]
+        );
+    }
+
+    match write_index(uri_path, p) {
+        Ok(v) => {
+            let mut resp = match Response::builder()
+                .status(StatusCode::OK)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html"),
+                )
+                .header(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from(v.len())
+                )
+                .body(Body::from(v))
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    log::error!(
+                        "Error building response: {}", &e
+                    );
+                    return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+                },
+            };
+
+            for (name, val) in addl_headers.drain(..) {
+                resp.headers_mut().insert(name, val);
+            }
+
+            resp
+        },
+        Err(e) => {
+            log::error!(
+                "Error writing autoindex of {:?}: {}",
+                p.display(), &e
+            );
+            canned_html_response(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }

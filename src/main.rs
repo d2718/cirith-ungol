@@ -67,12 +67,17 @@ fn init_logging(level: &str) {
     let log_cfg = simplelog::ConfigBuilder::new()
         .add_filter_allow_str("cirith_ungol")
         .build();
+    
+    #[cfg(debug_assertions)]
+    let color_choice = ColorChoice::Auto;
+    #[cfg(not(debug_assertions))]
+    let color_choice = ColorChoice::Never;
 
     if simplelog::TermLogger::init(
         level,
         log_cfg,
         TerminalMode::Mixed,
-        ColorChoice::Auto,
+        color_choice,
     ).is_err() {
         log::error!("Logging already started.");
     } else {
@@ -175,7 +180,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
     match (cfg.port, cfg.https_config) {
         (Some(port), Some((listener, tls_addr))) => {
             log::info!("Serving HTTP on port {}", &port);
-            log::info!("Serving HTTPS on port {}", &tls_addr);
+            log::info!("Serving HTTPS on port {}", &tls_addr.port());
 
             let addr = SocketAddr::from(([0, 0, 0, 0,], port));
             let listener = listener.filter(|conn| {
@@ -206,7 +211,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
             http_server.serve(make_svc).await?;
         },
         (None, Some((listener, tls_addr))) => {
-            log::info!("Serving HTTPS on port {}", &tls_addr);
+            log::info!("Serving HTTPS on port {}", &tls_addr.port());
 
             let listener = listener.filter(|conn| {
                 if let Err(e) = conn {

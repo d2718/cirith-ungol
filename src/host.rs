@@ -7,6 +7,7 @@ use std::{
     fs::Metadata,
     io::{ErrorKind, Write},
     net::SocketAddr,
+    ops::Deref,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::Stdio,
@@ -30,6 +31,7 @@ use tokio::{
 
 use crate::{
     MIME_TYPES,
+    resp,
     resp::{canned_html_response, header_only},
     SERVER,
 };
@@ -52,7 +54,7 @@ fn responsify(bytes: &[u8]) -> Result<Response<Body>, String> {
     let body = Body::from(Vec::from(&bytes[body_idx..]));
 
     let mut resp = Response::builder()
-        .status(200)
+        .status(StatusCode::OK)
         .body(body)
         .map_err(|e| format!(
             "Error generating response: {}", &e
@@ -73,27 +75,6 @@ fn responsify(bytes: &[u8]) -> Result<Response<Body>, String> {
     }
 
     Ok(resp)
-}
-
-fn to_header_value(odt: OffsetDateTime) -> Option<HeaderValue> {
-    log::trace!("to_header_value( {:?} ) called.", &odt);
-
-    match odt.format(&Rfc2822) {
-        Ok(tstamp) => {
-            return match HeaderValue::try_from(tstamp) {
-                Ok(hv) => Some(hv),
-                Err(e) => {
-                    log::error!("Error converting timestamp to HeaderValue: {}", &e);
-                    None
-                },
-            };
-        },
-        Err(e) => {
-            log::error!("Error formatting OffsetDateTime: {}", &e);
-        },
-    }
-
-    None
 }
 
 /// Values of the `Etag` and `Last-Modified` headers.
@@ -208,10 +189,20 @@ impl Bandwidth {
     }
  }
 
+ /// Describes how to respond to requests for URI paths that map to
+ /// directories in the local filesystem.
 #[derive(Debug)]
 enum Index {
+    /// Append the contained `PathBuf` to the URI and attempt to serve
+    /// that file.
     Path(PathBuf),
+    /// Append the contained `PathBuf` to the URI and attempt to serve
+    /// that file if it exists, otherwise generate an automated HTML
+    /// directory listing.
+    Fallback(PathBuf),
+    /// Generate an automated HTML directory listing.
     Auto,
+    /// Respond with a 404.
     No,
 }
 
@@ -239,8 +230,8 @@ impl Host {
         let root = root.canonicalize().map_err(|e| format!(
             "Cannot canonicalize root directory {:?}: {}", &root, &e
         ))?;
-        let mut index_style = Index::No;
-        if let Some(index) = index {
+
+        let index_style = if let Some(index) = index {
             if !index.is_relative() {
                 log::warn!(
                     "index is {:?}. For best results it should be a relative path like {:?}.",
@@ -248,15 +239,15 @@ impl Host {
                 );
             }
             if autoindex {
-                log::warn!(
-                    "index value set ({:?}); autoindex value of true ignored.", &index
-                );
+                Index::Fallback(index)
+            } else {
+                Index::Path(index)
             }
-            index_style = Index::Path(index);
         } else if autoindex {
-            return Err("Autoindexing not yet supported.".to_owned());
-            //index_style = Index::Auto;
-        }
+            Index::Auto
+        } else {
+            Index::No
+        };
 
         let mut cgi_opt: Option<BTreeSet<PathBuf>> = None;
         if !cgi_dirs.is_empty() {
@@ -286,16 +277,14 @@ impl Host {
             "Host[{}]::to_local_path( {:?} ) called.", &self.name, uri
         );
 
-        let uri_path = PathBuf::from(uri.path());
-        let mut uri_path = match uri_path.strip_prefix("/") {
+        let decoded = urlencoding::decode(uri.path()).map_err(|e| format!(
+            "URI path not UTF-8: {}", &e
+        ))?;
+        let uri_path = PathBuf::from(decoded.deref());
+        let uri_path = match uri_path.strip_prefix("/") {
             Ok(rel) => self.root.join(rel),
             Err(_) => self.root.join(uri_path),
         };
-        if uri_path.is_dir() {
-            if let Index::Path(ref index) = self.index {
-                uri_path = uri_path.join(index);
-            }
-        }
 
         uri_path.canonicalize().map_err(|e| format!(
             "Canonicalization of {} failed: {}", uri_path.display(), &e
@@ -372,7 +361,7 @@ impl Host {
                 log::error!(
                     "Error launching CGI process {}: {}", p.display(), &e
                 );
-                return canned_html_response(500);
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
             },
         };
 
@@ -383,7 +372,7 @@ impl Host {
                     log::error!(
                         "Error reading request body: {}", &e
                     );
-                    return canned_html_response(500);
+                    return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
                 },
             };
 
@@ -392,7 +381,7 @@ impl Host {
                     "Error writing request body to script {}: {}",
                     p.display(), &e
                 );
-                return canned_html_response(500);
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
             }
         }
 
@@ -403,7 +392,7 @@ impl Host {
                     "Error reading CGI process {} response: {}",
                     p.display(), &e
                 );
-                return canned_html_response(500);
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
             },
         };
 
@@ -412,7 +401,7 @@ impl Host {
                 Ok(r) => r,
                 Err(e) => {
                     log::error!("{}", &e);
-                    canned_html_response(500)
+                    canned_html_response(StatusCode::INTERNAL_SERVER_ERROR)
                 },
             }
         } else {
@@ -422,7 +411,7 @@ impl Host {
                 output.status.code(),
                 &String::from_utf8_lossy(&output.stderr)
             );
-            canned_html_response(500)
+            canned_html_response(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
 
@@ -432,27 +421,12 @@ impl Host {
             &self.name, req.uri()
         );
 
-        let local_path = match self.to_local_path(req.uri()) {
+        let mut local_path = match self.to_local_path(req.uri()) {
             Ok(pbuff) => pbuff,
             Err(e) => {
                 log::error!("{}", &e);
-                return canned_html_response(404);
+                return canned_html_response(StatusCode::NOT_FOUND);
             },
-        };
-
-        let metadata = match std::fs::metadata(&local_path) {
-            Ok(md) => md,
-            Err(e) => match e.kind() {
-                ErrorKind::NotFound => {
-                    return canned_html_response(404);
-                },
-                ErrorKind::PermissionDenied => {
-                    return canned_html_response(403);
-                },
-                _ => {
-                    return canned_html_response(500);
-                },
-            }
         };
 
         if let Some(cgi_dirs) = &self.cgi_dirs {
@@ -464,12 +438,55 @@ impl Host {
         }
 
         if req.method() != Method::GET {
-            return canned_html_response(405);
+            return canned_html_response(StatusCode::METHOD_NOT_ALLOWED);
         }
+
+        let mut metadata = match std::fs::metadata(&local_path) {
+            Ok(md) => md,
+            Err(e) => match e.kind() {
+                ErrorKind::NotFound => {
+                    return canned_html_response(StatusCode::NOT_FOUND);
+                },
+                ErrorKind::PermissionDenied => {
+                    return canned_html_response(StatusCode::FORBIDDEN);
+                },
+                _ => {
+                    return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+                },
+            }
+        };
+
+        if metadata.is_dir() {
+            match &self.index {
+                Index::Path(ref index_fname) => {
+                    local_path = local_path.join(index_fname);
+                    metadata = match std::fs::metadata(&local_path) {
+                        Ok(md) => md,
+                        _ => { return canned_html_response(StatusCode::NOT_FOUND); },
+                    };
+                },
+                Index::Fallback(ref index_fname) => {
+                    let maybe_index = local_path.join(index_fname);
+                    metadata = match std::fs::metadata(&maybe_index) {
+                        Ok(md) => {
+                            local_path = maybe_index;
+                            md
+                        },
+                        _ => {
+                            return resp::index(req.uri().path(), &local_path, vec![]);
+                        }
+                    }
+                }
+                Index::No => { return canned_html_response(StatusCode::NOT_FOUND); },
+                Index::Auto => {
+                    return resp::index(req.uri().path(), &local_path, vec![]);
+                },
+            }
+        };
 
         let bandwidth = Bandwidth::check(&metadata, &req);
         if &Bandwidth::NotModified == &bandwidth {
-            return header_only(304, vec![]);
+            return header_only(StatusCode::NOT_MODIFIED, vec![]);
         }
 
         let content_type = match local_path.extension() {
@@ -495,7 +512,7 @@ impl Host {
                 let bod = Body::from(bytes);
 
                 let mut resp = match Response::builder()
-                    .status(200)
+                    .status(StatusCode::OK)
                     .header(
                         header::CONTENT_TYPE,
                         content_type
@@ -527,7 +544,7 @@ impl Host {
             Err(e) => match e.kind() {
                 ErrorKind::NotFound => canned_html_response(404),
                 ErrorKind::PermissionDenied => canned_html_response(403),
-                _ => canned_html_response(500),
+                _ => canned_html_response(StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
     }
@@ -634,7 +651,7 @@ impl HostConfig {
 
         match self.get_host(hostname) {
             Some(h) => h.handle(req).await,
-            None => canned_html_response(404),
+            None => canned_html_response(StatusCode::NOT_FOUND),
         }
     }
 }

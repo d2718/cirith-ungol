@@ -12,6 +12,7 @@ The current working version has the following basic features:
   * request logging
   * per-IP request rate limiting
   * very permissive CORS layer
+  * autogeneration of directory indices
 
 The target use case of this software is serving small or personal websites
 from virtual machines. The main goal is simple configuration; it's useable
@@ -117,7 +118,7 @@ sudo nohup cirith-ungol >run.log &
     common places)
   * ~~request rate limiting~~
   * ~~maybe per-IP rate limiting~~
-  * directory autoindexing
+  * ~~directory autoindexing~~
   * ~~ETags~~ Also serves `Last-Modified` header, and responds appropriately
     to requests with `If-None-Match` and `If-Modified-Since` headers.
   * ~~CORS layer (pretty sure this is just a matter of adding an existing
