@@ -457,6 +457,33 @@ impl Host {
         };
 
         if metadata.is_dir() {
+
+            // Browsers won't deal with some relative URI paths properly if
+            // the final character in the path of a directory isn't a '/'.
+            let uri_path = req.uri().path();
+            if uri_path.as_bytes().last() != Some(&b'/') {
+                let mut new_path = String::from(uri_path);
+                new_path.push('/');
+                let new_path = match HeaderValue::try_from(new_path) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        log::error!(
+                            "Error turning new path into HeaderValue: {}", &e
+                        );
+                        return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+                    },
+                };
+                return header_only(
+                    StatusCode::MOVED_PERMANENTLY,
+                    vec![
+                        (
+                            header::LOCATION,
+                            new_path
+                        )
+                    ]
+                );
+            }
+
             match &self.index {
                 Index::Path(ref index_fname) => {
                     local_path = local_path.join(index_fname);

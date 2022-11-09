@@ -267,29 +267,6 @@ where
         p.display(), addl_headers.len()
     );
 
-    if uri_path.as_bytes().last() != Some(&b'/') {
-        let mut new_path = String::from(uri_path);
-        new_path.push('/');
-        let new_path = match HeaderValue::try_from(new_path) {
-            Ok(val) => val,
-            Err(e) => {
-                log::error!(
-                    "Error turning new path into HeaderValue: {}", &e
-                );
-                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
-            },
-        };
-        return header_only(
-            StatusCode::MOVED_PERMANENTLY,
-            vec![
-                (
-                    header::LOCATION,
-                    new_path
-                )
-            ]
-        );
-    }
-
     match write_index(uri_path, p) {
         Ok(v) => {
             let mut resp = match Response::builder()
