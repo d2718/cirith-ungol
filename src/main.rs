@@ -20,7 +20,6 @@ use tower::{Service, ServiceBuilder};
 use tokio_rustls::server::TlsStream;
 use tower_http::{
     add_extension::AddExtensionLayer,
-    cors::CorsLayer,
     set_header::response::SetResponseHeaderLayer,
 };
 
@@ -136,10 +135,13 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
         None => None,
     };
 
-    let cors_layer = CorsLayer::very_permissive();
 
     log::debug!(
         "Host configuration:\n{:#?}", &cfg.hosts
+    );
+
+    log::debug!(
+        "CORS configuration:\n{:#?}", &cfg.cors_layer
     );
 
     let service = ServiceBuilder::new()
@@ -150,7 +152,7 @@ async fn wrapped_main() -> Result<(), Box<dyn Error>> {
             header::SERVER,
             header::HeaderValue::from_str(&SERVER).unwrap(),
         ))
-        .layer(cors_layer)
+        .option_layer(cfg.cors_layer)
         .layer(AddExtensionLayer::new(Arc::new(cfg.hosts)))
         .service_fn(handle);
 

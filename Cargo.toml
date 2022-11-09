@@ -1,6 +1,6 @@
 [package]
 name = "cirith-ungol"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 drop-root = "^0.1"
 futures-util = "^0.3"
+http = "^0.2"
 httparse = "^1.8"
 hyper = { version = "^0.14", features = ["http1", "http2", "server", "stream", "tcp"] }
 libc = "^0.2"

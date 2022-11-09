@@ -11,7 +11,7 @@ The current working version has the following basic features:
   * configurable blacklist
   * request logging
   * per-IP request rate limiting
-  * very permissive CORS layer
+  * configurable CORS
   * autogeneration of directory indices
 
 The target use case of this software is serving small or personal websites
@@ -123,7 +123,10 @@ sudo nohup cirith-ungol >run.log &
     to requests with `If-None-Match` and `If-Modified-Since` headers.
   * ~~CORS layer (pretty sure this is just a matter of adding an existing
     [`tower`](https://github.com/tower-rs/tower) Service)~~
-  * configurable CORS layer (it is, in fact, a pretty simple `tower` layer)
+  * ~~configurable CORS layer (it is, in fact, a pretty simple `tower` layer)~~
+    Server-wide CORS policy is configurable by choosing a base policy
+    ("none", "restrictive", "permissive" [default], "very") and optionally
+    customizing some of the header values.
   * custom error pages?
   * more complete set of environment variables passed through CGI
   * custom MIME type configuration
