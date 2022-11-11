@@ -3,38 +3,32 @@ Mostly functions for writing `hyper::Response`s.
 */
 
 use std::{
+    ffi::OsStr,
     fmt::Debug,
     fs::{DirEntry, Metadata},
-    ffi::OsStr,
     io::{ErrorKind, Write},
     net::SocketAddr,
     os::unix::ffi::OsStrExt,
-    process::Stdio,
     path::Path,
+    process::Stdio,
     time::SystemTime,
 };
 
 use futures_util::{FutureExt, StreamExt};
 use hyper::{
-    Body, header, Method, Request, Response, StatusCode,
+    header,
     header::{HeaderName, HeaderValue},
+    Body, Method, Request, Response, StatusCode,
 };
 use smallvec::SmallVec;
 use time::{
-    format_description::{
-        FormatItem,
-        well_known::Rfc2822,
-    },
+    format_description::{well_known::Rfc2822, FormatItem},
     macros::format_description,
     OffsetDateTime,
 };
 use tokio::{
     fs::File,
-    io::{
-        AsyncRead, AsyncReadExt,
-        AsyncBufReadExt,
-        BufReader, BufWriter
-    },
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, BufWriter},
     process::Command,
 };
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -44,19 +38,19 @@ use crate::{
     SERVER,
 };
 
-static CANNED_HEAD:   &str = include_str!("response_files/canned_head.html");
+static CANNED_HEAD: &str = include_str!("response_files/canned_head.html");
 static CANNED_MIDDLE: &str = include_str!("response_files/canned_middle.html");
-static CANNED_FOOT:   &str = include_str!("response_files/canned_foot.html");
-static CANNED_BASE_RESPONSE_LEN: usize = CANNED_HEAD.len() + CANNED_MIDDLE.len() + CANNED_FOOT.len();
+static CANNED_FOOT: &str = include_str!("response_files/canned_foot.html");
+static CANNED_BASE_RESPONSE_LEN: usize =
+    CANNED_HEAD.len() + CANNED_MIDDLE.len() + CANNED_FOOT.len();
 
-static INDEX_HEAD:   &str = include_str!("response_files/autoindex_head.html");
+static INDEX_HEAD: &str = include_str!("response_files/autoindex_head.html");
 static INDEX_MIDDLE: &str = include_str!("response_files/autoindex_middle.html");
-static INDEX_FOOT:   &str = include_str!("response_files/autoindex_foot.html");
+static INDEX_FOOT: &str = include_str!("response_files/autoindex_foot.html");
 //static INDEX_BASE_RESPONSE_LEN: usize = INDEX_HEAD.len() + INDEX_MIDDLE.len() + INDEX_FOOT.len();
 
-static INDEX_TIME_FMT: &[FormatItem] = format_description!(
-    "[year]-[month]-[day] [hour]:[minute]:[second]"
-);
+static INDEX_TIME_FMT: &[FormatItem] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
 static R_403: (&str, &str) = (
     "Forbidden (403)",
@@ -91,7 +85,7 @@ static R_500: (&str, &str) = (
 
 pub fn canned_html_response<S>(code: S) -> Response<Body>
 where
-    S: TryInto<StatusCode> + Debug + Copy
+    S: TryInto<StatusCode> + Debug + Copy,
 {
     log::trace!("canned_html_response( {:?} ) called.", &code);
 
@@ -100,7 +94,7 @@ where
         Err(_) => {
             log::error!("Unable to convert to StatusCode: {:?}", &code);
             StatusCode::INTERNAL_SERVER_ERROR
-        },
+        }
     };
 
     let (title, contents) = match code {
@@ -111,10 +105,13 @@ where
         StatusCode::TOO_MANY_REQUESTS => R_429,
         StatusCode::INTERNAL_SERVER_ERROR => R_500,
         x => {
-            log::warn!("resp::canned_html_response(): unsupported status code {:?}, using 500.", &x);
+            log::warn!(
+                "resp::canned_html_response(): unsupported status code {:?}, using 500.",
+                &x
+            );
             code = StatusCode::INTERNAL_SERVER_ERROR;
             R_500
-        },
+        }
     };
 
     let response_length = CANNED_BASE_RESPONSE_LEN + title.len() + contents.len();
@@ -128,27 +125,20 @@ where
 
     Response::builder()
         .status(code)
-        .header(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html"),
-        )
-        .header(
-            header::CONTENT_LENGTH,
-            HeaderValue::from(response_length),
-        )
-        .body(Body::from(v)).unwrap()
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html"))
+        .header(header::CONTENT_LENGTH, HeaderValue::from(response_length))
+        .body(Body::from(v))
+        .unwrap()
 }
 
-pub fn header_only<S>(
-    code: S,
-    mut addl_headers: Vec<(HeaderName, HeaderValue)>
-) -> Response<Body>
+pub fn header_only<S>(code: S, mut addl_headers: Vec<(HeaderName, HeaderValue)>) -> Response<Body>
 where
-    S: TryInto<StatusCode> + Debug + Copy
+    S: TryInto<StatusCode> + Debug + Copy,
 {
     log::trace!(
         "header_only( {:?}, [ {} add'l headers ] ) called.",
-        &code, addl_headers.len()
+        &code,
+        addl_headers.len()
     );
 
     let code: StatusCode = match code.try_into() {
@@ -156,14 +146,14 @@ where
         Err(_) => {
             log::error!("Unable to convert StatusCode: {:?}", &code);
             StatusCode::INTERNAL_SERVER_ERROR
-        },
+        }
     };
 
     let mut resp = Response::builder()
         .status(code)
         .body(Body::empty())
         .unwrap();
-    
+
     for (name, val) in addl_headers.drain(..) {
         resp.headers_mut().insert(name, val);
     }
@@ -201,22 +191,18 @@ impl Bandwidth {
     of the bandwidth-saving headers to send with it if so.
     */
     fn check(md: &Metadata, req: &Request<Body>) -> Bandwidth {
-        log::trace!(
-            "Bandwidth::check( [ Metadata ], {:?} ) called.",
-            req.uri()
-        );
+        log::trace!("Bandwidth::check( [ Metadata ], {:?} ) called.", req.uri());
         let (since_epoch, last_modified) = match md.modified() {
             Ok(systime) => match systime.duration_since(SystemTime::UNIX_EPOCH) {
                 Ok(dur) => (dur, systime),
                 Err(e) => {
-                    log::error!(
-                        "Last modified time {:?} before epoch: {}",
-                        &systime, &e
-                    );
+                    log::error!("Last modified time {:?} before epoch: {}", &systime, &e);
                     return Bandwidth::Unknown;
-                },
+                }
             },
-            Err(_) => { return Bandwidth::Unknown; }
+            Err(_) => {
+                return Bandwidth::Unknown;
+            }
         };
 
         let etag = {
@@ -230,12 +216,9 @@ impl Bandwidth {
             match HeaderValue::try_from(bytes.as_slice()) {
                 Ok(val) => val,
                 Err(e) => {
-                    log::error!(
-                        "Error headerizing Etag value {:?}: {}",
-                        &bytes, &e
-                    );
+                    log::error!("Error headerizing Etag value {:?}: {}", &bytes, &e);
                     return Bandwidth::Unknown;
-                },
+                }
             }
         };
 
@@ -262,7 +245,8 @@ impl Bandwidth {
             if let Err(e) = last_modified.format_into(&mut bytes, &Rfc2822) {
                 log::error!(
                     "Error formatting last modified date {:?}: {}",
-                    &last_modified, &e
+                    &last_modified,
+                    &e
                 );
                 return Bandwidth::Unknown;
             }
@@ -271,7 +255,8 @@ impl Bandwidth {
                 Err(e) => {
                     log::error!(
                         "Error headerizing last modified date {:?}: {}",
-                        &last_modified, &e
+                        &last_modified,
+                        &e
                     );
                     return Bandwidth::Unknown;
                 }
@@ -281,13 +266,13 @@ impl Bandwidth {
         let bw_headers = BandwidthHeaders { etag, modified };
         Bandwidth::Modified(bw_headers)
     }
- }
+}
 
 fn write_dir_metadata<W, N, C, E>(
     mut w: W,
     modified: Result<SystemTime, E>,
     utf8name: N,
-    encoded_name: C
+    encoded_name: C,
 ) -> std::io::Result<()>
 where
     W: Write,
@@ -302,13 +287,17 @@ where
     writeln!(w, "<tr>\n    <td></td>\n    <td>")?;
     if let Ok(systime) = modified {
         let odt = OffsetDateTime::from(systime);
-        odt.format_into(&mut w, INDEX_TIME_FMT).map_err(|e| match e {
-            Format::StdIo(e) => e,
-            _ => { panic!("This formatting error shouldn't happen."); },
-        })?;
+        odt.format_into(&mut w, INDEX_TIME_FMT)
+            .map_err(|e| match e {
+                Format::StdIo(e) => e,
+                _ => {
+                    panic!("This formatting error shouldn't happen.");
+                }
+            })?;
     }
     writeln!(
-        w, "</td>\n    <td><a href=\"{}/\">{}/</a></td>\n</tr>",
+        w,
+        "</td>\n    <td><a href=\"{}/\">{}/</a></td>\n</tr>",
         encd, name
     )
 }
@@ -318,7 +307,7 @@ fn write_file_metadata<W, N, C, E>(
     size: u64,
     modified: Result<SystemTime, E>,
     utf8name: N,
-    encoded_name: C
+    encoded_name: C,
 ) -> std::io::Result<()>
 where
     W: Write,
@@ -326,20 +315,24 @@ where
     C: AsRef<str>,
 {
     use time::error::Format;
-    
+
     let name = utf8name.as_ref();
     let encd = encoded_name.as_ref();
 
     writeln!(w, "<tr>\n    <td>{}</td>\n    <td>", size)?;
     if let Ok(systime) = modified {
         let odt = OffsetDateTime::from(systime);
-        odt.format_into(&mut w, INDEX_TIME_FMT).map_err(|e| match e {
-            Format::StdIo(e) => e,
-            _ => { panic!("This formatting error shouldn't happen."); },
-        })?;
+        odt.format_into(&mut w, INDEX_TIME_FMT)
+            .map_err(|e| match e {
+                Format::StdIo(e) => e,
+                _ => {
+                    panic!("This formatting error shouldn't happen.");
+                }
+            })?;
     }
     writeln!(
-        w, "</td>\n    <td><a href=\"{}\">{}</a></td>\n</tr>",
+        w,
+        "</td>\n    <td><a href=\"{}\">{}</a></td>\n</tr>",
         encd, name
     )
 }
@@ -355,28 +348,22 @@ where
     let ftype = metadata.file_type();
 
     if ftype.is_file() {
-        write_file_metadata(w,
+        write_file_metadata(
+            w,
             metadata.len(),
             metadata.modified(),
             utf8name,
-            encoded_name
+            encoded_name,
         )?;
     } else if ftype.is_dir() {
-        write_dir_metadata(w,
-            metadata.modified(),
-            utf8name,
-            encoded_name
-        )?;
+        write_dir_metadata(w, metadata.modified(), utf8name, encoded_name)?;
     }
     // If it's anything else, don't write about it.
 
     Ok(())
 }
 
-fn write_index(
-    uri_path: &str,
-    p: &Path
-) -> Result<Vec<u8>, std::io::Error> {
+fn write_index(uri_path: &str, p: &Path) -> Result<Vec<u8>, std::io::Error> {
     let mut v: Vec<u8> = Vec::new();
     v.write_all(INDEX_HEAD.as_bytes())?;
     v.write_all(uri_path.as_bytes())?;
@@ -396,27 +383,21 @@ pub fn respond_dir_index<P>(
     mut addl_headers: Vec<(HeaderName, HeaderValue)>,
 ) -> Result<Response<Body>, String>
 where
-    P: AsRef<Path>
+    P: AsRef<Path>,
 {
     let p = local_path.as_ref();
     log::trace!(
         "respond_dir_index( {}, [ {} add'l headers ] ) called.",
-        p.display(), addl_headers.len()
+        p.display(),
+        addl_headers.len()
     );
 
-    let index_bytes = write_index(uri_path, p).map_err(|e| format!(
-        "Error writing response: {}", &e
-    ))?;
+    let index_bytes =
+        write_index(uri_path, p).map_err(|e| format!("Error writing response: {}", &e))?;
     let mut resp = Response::builder()
         .status(StatusCode::OK)
-        .header(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/html"),
-        )
-        .header(
-            header::CONTENT_LENGTH,
-            HeaderValue::from(index_bytes.len())
-        )
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html"))
+        .header(header::CONTENT_LENGTH, HeaderValue::from(index_bytes.len()))
         .body(Body::from(index_bytes))
         .map_err(|e| format!("Error building response: {}", &e))?;
 
@@ -445,15 +426,17 @@ pub async fn respond_static_file<P>(
     metadata: Metadata,
     req: Request<Body>,
 ) -> Result<Response<Body>, String>
-where P: AsRef<Path>
+where
+    P: AsRef<Path>,
 {
     let p = local_path.as_ref();
     log::trace!(
-        "respond_static_file( {}, [ Metadata ] ) called.", p.display()
+        "respond_static_file( {}, [ Metadata ] ) called.",
+        p.display()
     );
 
     let bandwidth = Bandwidth::check(&metadata, &req);
-    if &Bandwidth::NotModified == &bandwidth {
+    if Bandwidth::NotModified == bandwidth {
         return Ok(header_only(StatusCode::NOT_MODIFIED, vec![]));
     }
 
@@ -467,15 +450,13 @@ where P: AsRef<Path>
         Err(e) => match e.kind() {
             ErrorKind::NotFound => {
                 return Ok(canned_html_response(StatusCode::NOT_FOUND));
-            },
+            }
             ErrorKind::PermissionDenied => {
                 return Ok(canned_html_response(StatusCode::FORBIDDEN));
-            },
+            }
             _ => {
-                return Err(format!(
-                    "Error generating body: {}", &e
-                ));
-            },
+                return Err(format!("Error generating body: {}", &e));
+            }
         },
     };
 
@@ -485,38 +466,41 @@ where P: AsRef<Path>
         .header(header::CONTENT_LENGTH, metadata.len());
 
     if let Bandwidth::Modified(bw) = bandwidth {
-        resp = resp.header(header::ETAG, bw.etag)
+        resp = resp
+            .header(header::ETAG, bw.etag)
             .header(header::LAST_MODIFIED, bw.modified);
     }
-    
+
     resp.body(body)
-        .map_err(|e| format!(
-            "Error generating Response: {}", &e
-        ))
+        .map_err(|e| format!("Error generating Response: {}", &e))
 }
 
 async fn cgi_reparse_response<R>(r: R) -> Result<Response<Body>, String>
-where R: AsyncRead + Send + Unpin + 'static
+where
+    R: AsyncRead + Send + Unpin + 'static,
 {
     let mut reader = BufReader::new(r);
-    let mut resp = Response::builder()
-        .status(StatusCode::OK);
+    let mut resp = Response::builder().status(StatusCode::OK);
     let mut buff = String::new();
 
     match reader.read_line(&mut buff).await {
-        Ok(0) => { return Err("CGI script produced no output!".to_owned()); },
-        Err(e) => { return Err(format!("Error reading from output: {}", &e)); },
-        Ok(_) => {/* This is what we want to happen. */},
+        Ok(0) => {
+            return Err("CGI script produced no output!".to_owned());
+        }
+        Err(e) => {
+            return Err(format!("Error reading from output: {}", &e));
+        }
+        Ok(_) => { /* This is what we want to happen. */ }
     }
 
     while buff.trim() != "" {
         match buff.split_once(':') {
             Some((name, value)) => {
                 resp = resp.header(name.trim(), value.trim());
-            },
+            }
             None => {
                 return Err(format!("Invalid header line: {:?}", &buff));
-            },
+            }
         }
 
         buff.clear();
@@ -526,27 +510,27 @@ where R: AsyncRead + Send + Unpin + 'static
                 // has produced only headers and no body. We're going to
                 // consider this a reasonable outcome and not throw an error.
                 break;
-            },
-            Err(e) => { return Err(format!("Error reading from output: {}", &e)); },
-            Ok(_) => { /* This is, again, the happy path. */ },
+            }
+            Err(e) => {
+                return Err(format!("Error reading from output: {}", &e));
+            }
+            Ok(_) => { /* This is, again, the happy path. */ }
         }
     }
 
     let rs = ReaderStream::new(reader);
     let body = Body::wrap_stream(rs);
-    resp.body(body).map_err(|e| format!(
-        "Error generating CGI response: {}", &e
-    ))
+    resp.body(body)
+        .map_err(|e| format!("Error generating CGI response: {}", &e))
 }
 
 async fn read_child_stderr<R>(mut r: R) -> Result<String, String>
-where R: AsyncRead + Unpin
+where
+    R: AsyncRead + Unpin,
 {
     let mut stderr = String::new();
     if let Err(e) = r.read_to_string(&mut stderr).await {
-        return Err(format!(
-            "Error reading child process stderr: {}", &e
-        ));
+        return Err(format!("Error reading child process stderr: {}", &e));
     }
 
     Ok(stderr)
@@ -555,14 +539,16 @@ where R: AsyncRead + Unpin
 pub async fn cgi<P>(
     p: P,
     mut req: Request<Body>,
-    document_root: &Path
+    document_root: &Path,
 ) -> Result<Response<Body>, String>
-where P: AsRef<Path>,
+where
+    P: AsRef<Path>,
 {
     let p = p.as_ref();
     log::trace!(
         "cgi( {}, [ Request ], {} ) called.",
-        p.display(), document_root.display()
+        p.display(),
+        document_root.display()
     );
 
     let mut cmd = Command::new(p);
@@ -574,12 +560,10 @@ where P: AsRef<Path>,
     match std::env::current_exe() {
         Ok(path) => {
             cmd.env("PATH", &path);
-        },
+        }
         Err(e) => {
-            log::error!(
-                "Error detecting current process path: {}", &e
-            );
-        },
+            log::error!("Error detecting current process path: {}", &e);
+        }
     };
     if let Some(qstr) = req.uri().query() {
         cmd.env("QUERY_STRING", qstr);
@@ -600,7 +584,8 @@ where P: AsRef<Path>,
     // SERVER_PORT
     for (name, value) in req.headers().iter() {
         let var_name: String = format!("HTTP_{}", name)
-            .chars().map(|c| {
+            .chars()
+            .map(|c| {
                 if c.is_ascii_alphabetic() {
                     c.to_ascii_uppercase()
                 } else if c == '-' {
@@ -608,7 +593,8 @@ where P: AsRef<Path>,
                 } else {
                     c
                 }
-            }).collect();
+            })
+            .collect();
         let var_val = OsStr::from_bytes(value.as_bytes());
         cmd.env(var_name, var_val);
     }
@@ -621,39 +607,34 @@ where P: AsRef<Path>,
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!(
-        "error spawning process: {}", &e
-    ))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("error spawning process: {}", &e))?;
 
     if let Some(handle) = child.stdin.take() {
         let mut child_input = BufWriter::new(handle);
-        let output_reader = StreamReader::new(
-            req.body_mut().map(|x| match x {
-                Ok(chunk) => Ok(chunk),
-                Err(e) => Err(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("{}", &e)
-                    )
-                ),
-            })
-        );
+        let output_reader = StreamReader::new(req.body_mut().map(|x| match x {
+            Ok(chunk) => Ok(chunk),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{}", &e),
+            )),
+        }));
         let mut request_output = BufReader::new(output_reader);
 
-        tokio::io::copy(
-            &mut request_output,
-            &mut child_input
-        ).await.map_err(|e| format!(
-            "error writing request body to stdin: {}", &e
-        ))?;
+        tokio::io::copy(&mut request_output, &mut child_input)
+            .await
+            .map_err(|e| format!("error writing request body to stdin: {}", &e))?;
     }
 
-    let handle = child.stdout.take().ok_or(
-        "Unable to get a handle on child process stdout."
-    )?;
-    let stderr = child.stderr.take().ok_or(
-        "Unable to get a handle on child process stderr."
-    )?;
+    let handle = child
+        .stdout
+        .take()
+        .ok_or("Unable to get a handle on child process stdout.")?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Unable to get a handle on child process stderr.")?;
 
     let (resp, exit_status, stderr) = tokio::try_join!(
         cgi_reparse_response(handle),

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -43,17 +45,17 @@ static DEFAULT: &[(&str, &str)] = &[
 
 pub static OCTET_STREAM: HeaderValue = HeaderValue::from_static("application/octet=stream");
 
-pub static MIME_TYPES: Lazy<MimeMap> = Lazy::new(||
-    MimeMap::default()
-);
+pub static MIME_TYPES: Lazy<MimeMap> = Lazy::new(MimeMap::default);
 
 pub struct MimeMap {
-    map: BTreeMap<OsString, HeaderValue>
+    map: BTreeMap<OsString, HeaderValue>,
 }
 
 impl MimeMap {
     pub fn empty() -> Self {
-        Self { map: BTreeMap::new() }
+        Self {
+            map: BTreeMap::new(),
+        }
     }
 
     pub fn set<K, V>(&mut self, k: K, v: V) -> Result<(), String>
@@ -63,9 +65,8 @@ impl MimeMap {
         <HeaderValue as TryFrom<V>>::Error: std::fmt::Debug,
     {
         let k = k.into();
-        let v = HeaderValue::try_from(v).map_err(|e| format!(
-            "Error turning MIME type into header value: {:?}", &e
-        ))?;
+        let v = HeaderValue::try_from(v)
+            .map_err(|e| format!("Error turning MIME type into header value: {:?}", &e))?;
         _ = self.map.insert(k, v);
         Ok(())
     }
@@ -75,13 +76,14 @@ impl MimeMap {
         self.map.get(k)
     }
 
-    pub fn mime_type<'a, K: AsRef<OsStr>>(&'a self, k: K) -> &'a HeaderValue {
+    pub fn mime_type<K: AsRef<OsStr>>(&self, k: K) -> &HeaderValue {
         let k = k.as_ref().to_os_string().to_ascii_lowercase();
         self.map.get(&k).unwrap_or(&OCTET_STREAM)
     }
 
-    pub fn maybe_mime_type<'a, K>(&'a self, k: K) -> Option<&'a HeaderValue>
-    where K: AsRef<OsStr>
+    pub fn maybe_mime_type<K>(&self, k: K) -> Option<&HeaderValue>
+    where
+        K: AsRef<OsStr>,
     {
         let k = k.as_ref().to_os_string().to_ascii_lowercase();
         self.map.get(&k)
@@ -90,15 +92,16 @@ impl MimeMap {
 
 impl Default for MimeMap {
     fn default() -> Self {
-        let map: BTreeMap<OsString, HeaderValue> = DEFAULT.iter()
-            .map(|(k, v)|
+        let map: BTreeMap<OsString, HeaderValue> = DEFAULT
+            .iter()
+            .map(|(k, v)| {
                 (
                     OsString::from_str(k).unwrap(),
-                    HeaderValue::try_from(*v).unwrap()
+                    HeaderValue::try_from(*v).unwrap(),
                 )
-            )
+            })
             .collect();
-        
+
         Self { map }
     }
 }

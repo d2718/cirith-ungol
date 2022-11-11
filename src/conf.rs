@@ -1,5 +1,4 @@
 /**! Configuration */
-
 use std::{
     collections::BTreeSet,
     net::{IpAddr, SocketAddr},
@@ -108,7 +107,7 @@ Arguments are exactly the values of `CfgFile::cors_base` and
 */
 fn make_cors_layer(
     base_string: Option<String>,
-    config: Option<CorsConfig>
+    config: Option<CorsConfig>,
 ) -> Result<Option<CorsLayer>, String> {
     // These are all namespace collisions with `hyper` names that get used
     // all over the place, so we restrict them to just this function.
@@ -118,13 +117,15 @@ fn make_cors_layer(
     };
 
     log::trace!(
-        "make_cors_layer( {:?}, {:?} ) called.", &base_string, &config
+        "make_cors_layer( {:?}, {:?} ) called.",
+        &base_string,
+        &config
     );
 
     let base_type = match base_string {
-        Some(s) => CorsBase::try_from(s).map_err(|e| format!(
-            "Error in cors_base value: {}", &e
-        ))?,
+        Some(s) => {
+            CorsBase::try_from(s).map_err(|e| format!("Error in cors_base value: {}", &e))?
+        }
         None => CorsBase::Permissive,
     };
 
@@ -133,14 +134,18 @@ fn make_cors_layer(
         Some(clayer) => clayer,
         None => {
             if config.is_some() {
-                log::warn!("Values in [[cors]] stanza ignored because cors_base is set to \"none\".");
+                log::warn!(
+                    "Values in [[cors]] stanza ignored because cors_base is set to \"none\"."
+                );
             }
             return Ok(None);
-        },
+        }
     };
 
     let config = match config {
-        None => { return Ok(Some(clayer)); },
+        None => {
+            return Ok(Some(clayer));
+        }
         Some(config) => config,
     };
 
@@ -151,9 +156,8 @@ fn make_cors_layer(
     if let Some(mut v) = config.allow_headers {
         let mut heads: Vec<HeaderName> = Vec::with_capacity(v.len());
         for name in v.drain(..) {
-            let head = HeaderName::try_from(name).map_err(|e| format!(
-                "Error in allow_headers: {}", &e
-            ))?;
+            let head = HeaderName::try_from(name)
+                .map_err(|e| format!("Error in allow_headers: {}", &e))?;
             heads.push(head);
         }
         clayer = clayer.allow_headers(heads);
@@ -162,9 +166,8 @@ fn make_cors_layer(
     if let Some(v) = config.allow_methods {
         let mut methods: Vec<Method> = Vec::with_capacity(v.len());
         for mname in v.iter() {
-            let m = Method::try_from(mname.as_str()).map_err(|e| format!(
-                "Error in allow_methods value \"{}\": {}", mname, &e
-            ))?;
+            let m = Method::try_from(mname.as_str())
+                .map_err(|e| format!("Error in allow_methods value \"{}\": {}", mname, &e))?;
             methods.push(m);
         }
         clayer = clayer.allow_methods(methods);
@@ -173,9 +176,8 @@ fn make_cors_layer(
     if let Some(mut v) = config.allow_origins {
         let mut origins: Vec<HeaderValue> = Vec::with_capacity(v.len());
         for oname in v.drain(..) {
-            let oval = HeaderValue::try_from(oname).map_err(|e| format!(
-                "Error in allow_origins: {}", &e
-            ))?;
+            let oval = HeaderValue::try_from(oname)
+                .map_err(|e| format!("Error in allow_origins: {}", &e))?;
             origins.push(oval);
         }
         clayer = clayer.allow_origin(origins);
@@ -184,9 +186,8 @@ fn make_cors_layer(
     if let Some(mut v) = config.expose_headers {
         let mut heads: Vec<HeaderName> = Vec::with_capacity(v.len());
         for name in v.drain(..) {
-            let head = HeaderName::try_from(name).map_err(|e| format!(
-                "Error in expose_headers: {}", &e
-            ))?;
+            let head = HeaderName::try_from(name)
+                .map_err(|e| format!("Error in expose_headers: {}", &e))?;
             heads.push(head);
         }
         clayer = clayer.expose_headers(heads);
@@ -223,52 +224,37 @@ impl Default for Cfg {
 impl Cfg {
     pub fn from_file<P: AsRef<Path>>(p: P) -> Result<Cfg, String> {
         let p = p.as_ref();
-        log::trace!(
-            "Cfg::from_file( {} ) called.", p.display()
-        );
+        log::trace!("Cfg::from_file( {} ) called.", p.display());
 
-        let cfg_bytes = std::fs::read(p).map_err(|e| format!(
-            "Error reading config file {}: {}", p.display(), &e
-        ))?;
-        let mut cf: CfgFile = toml::from_slice(&cfg_bytes).map_err(|e| format!(
-            "Error parsing config file {}: {}", p.display(), &e
-        ))?;
+        let cfg_bytes = std::fs::read(p)
+            .map_err(|e| format!("Error reading config file {}: {}", p.display(), &e))?;
+        let mut cf: CfgFile = toml::from_slice(&cfg_bytes)
+            .map_err(|e| format!("Error parsing config file {}: {}", p.display(), &e))?;
 
-        let mut cfg = Cfg::default();
-
-        cfg.user = cf.user;
-        
         if cf.host.is_empty() {
             return Err("You must configure at least one [[host]].".to_owned());
         }
         let mut hosts = Vec::with_capacity(cf.host.len());
         for hc in cf.host.drain(..) {
-            let aidx = match hc.autoindex {
-                Some(b) => b,
-                None => false,
-            };
-            let h = Host::new(
-                hc.name.clone(),
-                hc.root,
-                hc.index,
-                aidx,
-                hc.cgi
-            ).map_err(|e| format!(
-                "Error in [[host]] {:?}: {}", &hc.name, &e
-            ))?;
+            let aidx = hc.autoindex.unwrap_or(false);
+            let h = Host::new(hc.name.clone(), hc.root, hc.index, aidx, hc.cgi)
+                .map_err(|e| format!("Error in [[host]] {:?}: {}", &hc.name, &e))?;
 
             hosts.push(h);
         }
-        {
-            let mut hosts = HostConfig::from_hosts(hosts).map_err(|e| format!(
-                "Error configuring hosts: {}", &e
-            ))?;
-            if let Some(hostname) = cf.default_host {
-                hosts = hosts.default(&hostname).map_err(|e| format!(
-                    "Error setting default host: {}", &e
-                ))?;
-            }
-            cfg.hosts = hosts
+        let mut hosts = HostConfig::from_hosts(hosts)
+            .map_err(|e| format!("Error configuring hosts: {}", &e))?;
+        if let Some(hostname) = cf.default_host {
+            hosts = hosts
+                .default(&hostname)
+                .map_err(|e| format!("Error setting default host: {}", &e))?;
+        }
+
+        let mut cfg = Cfg {
+            user: cf.user,
+            hosts,
+            cors_layer: make_cors_layer(cf.cors_base, cf.cors)?,
+            ..Cfg::default()
         };
 
         if let Some(mut bl) = cf.blacklist {
@@ -282,25 +268,27 @@ impl Cfg {
                 let addr = SocketAddr::from(([0, 0, 0, 0], port));
                 let listener = tls::make_listener(cert_file, key_file, &addr)?;
                 cfg.https_config = Some((listener, addr));
-            },
+            }
             (None, None) => {
                 if let Some(port) = cf.https_port {
-                    log::warn!("Ignoring https_port value of {} (no cert or key files specified).", port);
+                    log::warn!(
+                        "Ignoring https_port value of {} (no cert or key files specified).",
+                        port
+                    );
                 }
-            },
+            }
             _ => {
                 return Err(
-                    "ssl_cert value also requires an ssl_key value (and vice versa)."
-                    .to_owned()
+                    "ssl_cert value also requires an ssl_key value (and vice versa).".to_owned(),
                 );
-            },
+            }
         }
 
         if cf.no_http == Some(false) {
             if cfg.https_config.is_none() {
                 return Err(
                     "It's pointless to specify no_http=true without having HTTPS configured."
-                    .to_owned()
+                        .to_owned(),
                 );
             }
             cfg.port = None;
@@ -319,7 +307,10 @@ impl Cfg {
 
         if let Some(x) = cf.rate_request_limit {
             if no_rate_limit {
-                log::warn!("no_rate_limit set; ignoring rate_request_limit value of {}.", &x);
+                log::warn!(
+                    "no_rate_limit set; ignoring rate_request_limit value of {}.",
+                    &x
+                );
             } else {
                 rate_request_limit = x;
             }
@@ -333,23 +324,20 @@ impl Cfg {
             }
         }
 
-        if let Some(x) =  cf.rate_prune_interval {
+        if let Some(x) = cf.rate_prune_interval {
             if no_rate_limit {
-                log::warn!("no_rate_limit set; ignoring rate_prune interval value of {}", &x);
+                log::warn!(
+                    "no_rate_limit set; ignoring rate_prune interval value of {}",
+                    &x
+                );
             } else {
                 rate_prune_interval = x;
             }
         }
 
         if !no_rate_limit {
-            cfg.rate_config = Some((
-                rate_request_limit,
-                rate_window,
-                rate_prune_interval
-            ));
+            cfg.rate_config = Some((rate_request_limit, rate_window, rate_prune_interval));
         }
-
-        cfg.cors_layer = make_cors_layer(cf.cors_base, cf.cors)?;
 
         Ok(cfg)
     }

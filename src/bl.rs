@@ -1,4 +1,3 @@
-
 use std::{
     collections::BTreeSet,
     future::Future,
@@ -19,16 +18,16 @@ pub fn set(blacklist: BTreeSet<IpAddr>) {
     match BLACKLIST.set(blacklist) {
         Ok(()) => {
             log::info!("Blacklisting {} addresses.", &n_addrs);
-        },
+        }
         Err(_) => {
             log::error!("Attempt to initialize already-initialized Blacklist.");
-        },
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct BlacklistService<S> {
-    inner: S
+    inner: S,
 }
 
 #[pin_project(project = BlFutProj)]
@@ -50,7 +49,7 @@ where
             BlFutProj::Ok(f) => {
                 let f: Pin<&mut F> = f;
                 f.poll(cx)
-            },
+            }
             BlFutProj::Blacklisted => {
                 let res = Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -64,7 +63,7 @@ where
 
 impl<ReqB, S> Service<Request<ReqB>> for BlacklistService<S>
 where
-    S: Service<Request<ReqB>, Response = Response<Body>>
+    S: Service<Request<ReqB>, Response = Response<Body>>,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -89,11 +88,11 @@ where
                 } else {
                     BlacklistFuture::Ok(self.inner.call(req))
                 }
-            },
+            }
             None => {
                 log::info!("BLACKLISTED for no addr.");
                 BlacklistFuture::Blacklisted
-            },
+            }
         }
     }
 }
@@ -101,11 +100,12 @@ where
 #[derive(Clone, Debug)]
 pub struct BlacklistLayer {}
 impl BlacklistLayer {
-    pub fn new() -> Self { Self{} }
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
-impl<S> Layer<S> for BlacklistLayer
-{
+impl<S> Layer<S> for BlacklistLayer {
     type Service = BlacklistService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {

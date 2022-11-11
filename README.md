@@ -59,9 +59,12 @@ default_host = "default"
 # and dropping root.
 user = "www-data"
 
-# You only need these next two if you want to support HTTPS.
-ssl_cert = "/path/to/cert_file.pem"
-ssl_key  = "/path/to/key_file.pem"
+# Example SSL configuration for certificate files provided by Let's Encrypt.
+# You only need to set these options if you want to support HTTPS, but
+# seeing as how you can get a cert for free these days, there's no reason
+# not to.
+ssl_cert = "/etc/letsencrypt/live/yourdomain.net/cert.pem"
+ssl_key  = "/etc/letsencrypt/live/yourdomain.net/privkey.pem"
 
 # Example of blacklisting IPs. You don't necessarily need to blacklist these.
 # Requests from these addresses will be insta-404'd.

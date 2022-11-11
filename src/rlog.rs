@@ -1,12 +1,11 @@
-
+use hyper::{header::HeaderValue, Body, Request, Response};
+use pin_project::pin_project;
 use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
     task::{Context, Poll},
 };
-use hyper::{Body, header::HeaderValue, Request, Response};
-use pin_project::pin_project;
 use tower::{Layer, Service};
 
 #[derive(Debug, Clone)]
@@ -14,8 +13,7 @@ pub struct RLogService<S> {
     inner: S,
 }
 
-impl<S> RLogService<S>
-{
+impl<S> RLogService<S> {
     pub fn new(inner: S) -> Self {
         Self { inner }
     }
@@ -43,12 +41,12 @@ where
                     //log::debug!("{:#?}", resp.headers());
                     log::info!("{} {}", resp.status().as_str(), &this.data);
                     Poll::Ready(Ok(resp))
-                },
+                }
                 Err(e) => {
                     log::info!("ERR {}", &this.data);
                     Poll::Ready(Err(e))
-                },
-            }
+                }
+            },
             Poll::Pending => Poll::Pending,
         }
     }
@@ -56,7 +54,7 @@ where
 
 impl<ReqB, S> Service<Request<ReqB>> for RLogService<S>
 where
-    S: Service<Request<ReqB>, Response = Response<Body>>
+    S: Service<Request<ReqB>, Response = Response<Body>>,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -69,34 +67,30 @@ where
     fn call(&mut self, req: Request<ReqB>) -> Self::Future {
         let addr: Option<&SocketAddr> = req.extensions().get();
 
-        let host: &str = match req.headers().get("host")
-            .map(HeaderValue::to_str)
-        {
+        let host: &str = match req.headers().get("host").map(HeaderValue::to_str) {
             Some(Ok(name)) => name,
-            _ => "[-host]"
+            _ => "[-host]",
         };
 
         let data = match addr {
-            Some(addr) => format!(
-                "{} {} {} {}",
-                host, addr, req.method(), req.uri()
-            ),
-            None => format!(
-                "{} [-addr] {} {}",
-                host, req.method(), req.uri()
-            ),
+            Some(addr) => format!("{} {} {} {}", host, addr, req.method(), req.uri()),
+            None => format!("{} [-addr] {} {}", host, req.method(), req.uri()),
         };
         let response_future = self.inner.call(req);
 
-        RLogFuture { response_future, data }
+        RLogFuture {
+            response_future,
+            data,
+        }
     }
-
 }
 
 #[derive(Clone, Debug)]
 pub struct RLogLayer {}
 impl RLogLayer {
-    pub fn new() -> Self { Self{} }
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
 impl<S> Layer<S> for RLogLayer {

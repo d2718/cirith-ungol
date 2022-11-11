@@ -1,13 +1,11 @@
-
-
 use std::{
     collections::HashMap,
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::Mutex,
-    time::{Duration, Instant},
     task::{Context, Poll},
+    time::{Duration, Instant},
 };
 
 use hyper::{Body, Request, Response, StatusCode};
@@ -29,11 +27,7 @@ impl LimitCounter {
         }
     }
 
-    pub fn should_serve_this_request(
-        &mut self,
-        limit: usize,
-        cooldown: Duration,
-    ) -> bool {
+    pub fn should_serve_this_request(&mut self, limit: usize, cooldown: Duration) -> bool {
         if self.oldest.elapsed() > cooldown {
             self.count = 1;
             self.oldest = Instant::now();
@@ -63,7 +57,9 @@ impl Limiter {
     fn new(limit: usize, cooldown: Duration, prune_period: usize) -> Limiter {
         Limiter {
             requests: HashMap::new(),
-            limit, cooldown, prune_period,
+            limit,
+            cooldown,
+            prune_period,
             request_counter: 0,
         }
     }
@@ -72,16 +68,18 @@ impl Limiter {
         self.request_counter += 1;
         if self.request_counter > self.prune_period {
             log::trace!(
-                "Pruning request limiter tree. Old size: {}", self.requests.len()
+                "Pruning request limiter tree. Old size: {}",
+                self.requests.len()
             );
-            self.requests.retain(|_, counter| !counter.is_expired(self.cooldown));
+            self.requests
+                .retain(|_, counter| !counter.is_expired(self.cooldown));
             log::trace!("New size: {}", self.requests.len());
             self.request_counter = 0;
         }
         if let Some(counter) = self.requests.get_mut(addr) {
             counter.should_serve_this_request(self.limit, self.cooldown)
         } else {
-            self.requests.insert(addr.clone(), LimitCounter::new());
+            self.requests.insert(*addr, LimitCounter::new());
             true
         }
     }
@@ -109,14 +107,14 @@ where
             RateFutProj::Ok(f) => {
                 let f: Pin<&mut F> = f;
                 f.poll(cx)
-            },
+            }
             RateFutProj::Throttled => {
                 let res = Response::builder()
                     .status(StatusCode::TOO_MANY_REQUESTS)
                     .body(Body::empty())
                     .unwrap();
                 Poll::Ready(Ok(res))
-            },
+            }
             RateFutProj::Ignored => {
                 let res = Response::builder()
                     .status(StatusCode::NOT_FOUND)
@@ -135,7 +133,7 @@ pub struct RateLimitService<S> {
 
 impl<ReqB, S> Service<Request<ReqB>> for RateLimitService<S>
 where
-    S: Service<Request<ReqB>, Response = Response<Body>>
+    S: Service<Request<ReqB>, Response = Response<Body>>,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -178,10 +176,10 @@ impl RateLimitLayer {
     pub fn new(
         limit: usize,
         cooldown: Duration,
-        prune_period: usize
+        prune_period: usize,
     ) -> Result<RateLimitLayer, &'static str> {
         let limiter = Limiter::new(limit, cooldown, prune_period);
-        if let Err(_) = LIMITER.set(Mutex::new(limiter)) {
+        if LIMITER.set(Mutex::new(limiter)).is_err() {
             Err("Already instantiated a RateLimitLayer.")
         } else {
             Ok(RateLimitLayer {})
@@ -189,8 +187,7 @@ impl RateLimitLayer {
     }
 }
 
-impl<S> Layer<S> for RateLimitLayer
-{
+impl<S> Layer<S> for RateLimitLayer {
     type Service = RateLimitService<S>;
 
     fn layer(&self, inner: S) -> RateLimitService<S> {
