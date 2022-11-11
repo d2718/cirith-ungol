@@ -106,23 +106,24 @@ impl Host {
         Ok(h)
     }
 
-    fn to_local_path(&self, uri: &Uri) -> Result<PathBuf, String> {
+    fn to_local_path(&self, uri: &Uri) -> Option<PathBuf> {
         log::trace!(
             "Host[{}]::to_local_path( {:?} ) called.", &self.name, uri
         );
 
-        let decoded = urlencoding::decode(uri.path()).map_err(|e| format!(
-            "URI path not UTF-8: {}", &e
-        ))?;
+        let decoded = match urlencoding::decode(uri.path()) {
+            Ok(path_str) => path_str,
+            Err(_) => { return None; }
+        };
         let uri_path = PathBuf::from(decoded.deref());
         let uri_path = match uri_path.strip_prefix("/") {
             Ok(rel) => self.root.join(rel),
             Err(_) => self.root.join(uri_path),
         };
-
-        uri_path.canonicalize().map_err(|e| format!(
-            "Canonicalization of {} failed: {}", uri_path.display(), &e
-        ))
+        match uri_path.canonicalize() {
+            Ok(path) => Some(path),
+            Err(_) => None,
+        }
     }
 
     async fn handle(&self, req: Request<Body>) -> Response<Body> {
@@ -132,9 +133,8 @@ impl Host {
         );
 
         let mut local_path = match self.to_local_path(req.uri()) {
-            Ok(pbuff) => pbuff,
-            Err(e) => {
-                log::error!("{}", &e);
+            Some(pbuff) => pbuff,
+            None => {
                 return canned_html_response(StatusCode::NOT_FOUND);
             },
         };

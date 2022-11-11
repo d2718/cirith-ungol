@@ -13,6 +13,7 @@ The current working version has the following basic features:
   * per-IP request rate limiting
   * configurable CORS
   * autogeneration of directory indices
+  * both static files and CGI responses are asynchronously streamed
 
 The target use case of this software is serving small or personal websites
 from virtual machines. The main goal is simple configuration; it's useable
