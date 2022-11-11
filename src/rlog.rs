@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use hyper::{Body, Request, Response};
+use hyper::{Body, header::HeaderValue, Request, Response};
 use pin_project::pin_project;
 use tower::{Layer, Service};
 
@@ -69,9 +69,22 @@ where
     fn call(&mut self, req: Request<ReqB>) -> Self::Future {
         let addr: Option<&SocketAddr> = req.extensions().get();
 
+        let host: &str = match req.headers().get("host")
+            .map(HeaderValue::to_str)
+        {
+            Some(Ok(name)) => name,
+            _ => "[-host]"
+        };
+
         let data = match addr {
-            Some(addr) => format!("{} {} {}", addr, req.method(), req.uri()),
-            None => format!("[-addr] {} {}", req.method(), req.uri()),
+            Some(addr) => format!(
+                "{} {} {} {}",
+                host, addr, req.method(), req.uri()
+            ),
+            None => format!(
+                "{} [-addr] {} {}",
+                host, req.method(), req.uri()
+            ),
         };
         let response_future = self.inner.call(req);
 
