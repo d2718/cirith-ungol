@@ -10,7 +10,10 @@ use std::{
 
 use hyper::{header, header::HeaderValue, Body, Method, Request, Response, StatusCode, Uri};
 
-use crate::resp::{canned_html_response, cgi, header_only, respond_dir_index, respond_static_file};
+use crate::{
+    resp,
+    resp::{canned_html_response, cgi, header_only, respond_dir_index, respond_static_file},
+};
 
 /// Describes how to respond to requests for URI paths that map to
 /// directories in the local filesystem.
@@ -353,10 +356,18 @@ impl HostConfig {
             req.method(),
             req.uri()
         );
-        /*         dbg_log(req.uri());
-        log::debug!(
-            "Request Headers:\n{:#?}", req.headers()
-        ); */
+
+        if req.method() == Method::TRACE {
+            match resp::trace(req) {
+                Ok(response) => {
+                    return response;
+                }
+                Err(e) => {
+                    log::error!("Error generating TRACE response: {}", &e);
+                    return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+        }
 
         let hostname = match req.headers().get("host").map(HeaderValue::to_str) {
             Some(Ok(name)) => name,
@@ -369,20 +380,3 @@ impl HostConfig {
         }
     }
 }
-
-/* fn dbg_log(uri: &Uri) {
-    log::debug!(
-        "URI: {:?}
-    schm: {:?}
-    auth: {:?}
-    host: {:?}
-    path: {:?}
-     qry: {:?}",
-        uri,
-        uri.scheme(),
-        uri.authority(),
-        uri.host(),
-        uri.path(),
-        uri.query(),
-    );
-} */

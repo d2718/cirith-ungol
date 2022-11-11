@@ -8,6 +8,7 @@ The current working version has the following basic features:
   * serves static files
   * HTTP and HTTPS
   * runs CGI programs in response to both `GET` and `POST` requests
+  * responds to `TRACE` requests
   * configurable blacklist
   * request logging
   * per-IP request rate limiting
@@ -137,7 +138,7 @@ sudo nohup cirith-ungol >run.log &
   * ~~streaming response bodies~~ The bodies of static files and CGI output
     both stream. Directory indices don't yet, but they may not need to,
     because those chunks of HTML shouldn't ever be particularly huge.
-  * Respond to RANGE requests.
+  * Respond to RANGE and HEAD requests.
   * Compression (Respond to `Accept-Encoding` header.)
   * Squash a bunch of the `tower::Layer`s together into a single layer to
     reduce async runtime complexity.

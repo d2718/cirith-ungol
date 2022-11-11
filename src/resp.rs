@@ -161,6 +161,41 @@ where
     resp
 }
 
+pub fn trace(req: Request<Body>) -> Result<Response<Body>, String> {
+    log::trace!("trace( [ Request for {} ] ) called.", req.uri());
+
+    let (parts, _) = req.into_parts();
+
+    let mut body = format!(
+        "{} {} {:?}\n",
+        &parts.method,
+        parts.uri.path(),
+        &parts.version
+    )
+    .into_bytes();
+
+    for (name, value) in parts.headers.iter() {
+        body.write(name.as_str().as_bytes())
+            .map_err(|e| format!("error writing header name: {}", &e))?;
+        body.push(b':');
+        body.push(b' ');
+        body.write(value.as_bytes())
+            .map_err(|e| format!("error writing header value: {}", &e))?;
+        body.push(b'\r');
+        body.push(b'\n');
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("message/http"),
+        )
+        .header(header::CONTENT_LENGTH, HeaderValue::from(body.len()))
+        .body(Body::from(body))
+        .map_err(|e| format!("error generating response: {}", &e))
+}
+
 /// Values of the `Etag` and `Last-Modified` headers.
 ///
 /// (For reducing bandwidth used.)
