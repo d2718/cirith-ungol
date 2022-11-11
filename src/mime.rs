@@ -4,6 +4,9 @@ use std::{
     str::FromStr,
 };
 
+use hyper::header::HeaderValue;
+use once_cell::sync::Lazy;
+
 static DEFAULT: &[(&str, &str)] = &[
     ("css", "text/css"),
     ("gz", "application/gzip"),
@@ -38,8 +41,14 @@ static DEFAULT: &[(&str, &str)] = &[
     ("7z", "application/x-7z-compressed"),
 ];
 
+pub static OCTET_STREAM: HeaderValue = HeaderValue::from_static("application/octet=stream");
+
+pub static MIME_TYPES: Lazy<MimeMap> = Lazy::new(||
+    MimeMap::default()
+);
+
 pub struct MimeMap {
-    map: BTreeMap<OsString, String>
+    map: BTreeMap<OsString, HeaderValue>
 }
 
 impl MimeMap {
@@ -47,41 +56,47 @@ impl MimeMap {
         Self { map: BTreeMap::new() }
     }
 
-    pub fn set<K, V>(&mut self, k: K, v: V)
+    pub fn set<K, V>(&mut self, k: K, v: V) -> Result<(), String>
     where
         K: Into<OsString>,
-        V: Into<String>,
+        HeaderValue: TryFrom<V>,
+        <HeaderValue as TryFrom<V>>::Error: std::fmt::Debug,
     {
         let k = k.into();
-        let v = v.into();
+        let v = HeaderValue::try_from(v).map_err(|e| format!(
+            "Error turning MIME type into header value: {:?}", &e
+        ))?;
         _ = self.map.insert(k, v);
+        Ok(())
     }
 
-    pub fn get<K: AsRef<OsStr>>(&self, k: K) -> Option<&String> {
+    pub fn get<K: AsRef<OsStr>>(&self, k: K) -> Option<&HeaderValue> {
         let k = k.as_ref();
         self.map.get(k)
     }
 
-    pub fn mime_type<'a, K: AsRef<OsStr>>(&'a self, k: K) -> &'a str {
+    pub fn mime_type<'a, K: AsRef<OsStr>>(&'a self, k: K) -> &'a HeaderValue {
         let k = k.as_ref().to_os_string().to_ascii_lowercase();
-        match self.map.get(&k) {
-            Some(t) => t.as_str(),
-            None => { "application/octet-stream" },
-        }
+        self.map.get(&k).unwrap_or(&OCTET_STREAM)
     }
 
-    pub fn maybe_mime_type<'a, K>(&'a self, k: K) -> Option<&'a str>
+    pub fn maybe_mime_type<'a, K>(&'a self, k: K) -> Option<&'a HeaderValue>
     where K: AsRef<OsStr>
     {
         let k = k.as_ref().to_os_string().to_ascii_lowercase();
-        self.map.get(&k).map(|s| s.as_str())
+        self.map.get(&k)
     }
 }
 
 impl Default for MimeMap {
     fn default() -> Self {
-        let map: BTreeMap<OsString, String> = DEFAULT.iter()
-            .map(|(k, v)| (OsString::from_str(k).unwrap(), String::from(*v)))
+        let map: BTreeMap<OsString, HeaderValue> = DEFAULT.iter()
+            .map(|(k, v)|
+                (
+                    OsString::from_str(k).unwrap(),
+                    HeaderValue::try_from(*v).unwrap()
+                )
+            )
             .collect();
         
         Self { map }

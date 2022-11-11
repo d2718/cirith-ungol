@@ -36,9 +36,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 static SERVER: Lazy<String> = Lazy::new(||
     format!("Cirith Ungol v{}", VERSION)
 );
-static MIME_TYPES: Lazy<mime::MimeMap> = Lazy::new(||
-    mime::MimeMap::default()
-);
 
 async fn handle(req: Request<Body>) -> Result<Response<Body>, Box<dyn Error + Send + Sync>> {
     let hosts: &Arc<host::HostConfig> = req.extensions().get()

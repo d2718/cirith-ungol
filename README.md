@@ -130,7 +130,11 @@ sudo nohup cirith-ungol >run.log &
   * custom error pages?
   * more complete set of environment variables passed through CGI
   * custom MIME type configuration
-  * streaming response bodies
+  * ~~streaming response bodies~~ The bodies of static files and CGI output
+    both stream. Directory indices don't yet, but they may not need to,
+    because those chunks of HTML shouldn't ever be particularly huge.
+  * Respond to RANGE requests.
+  * Compression (Respond to `Accept-Encoding` header.)
   * Squash a bunch of the `tower::Layer`s together into a single layer to
     reduce async runtime complexity.
 
