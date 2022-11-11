@@ -16,6 +16,9 @@ use time::{
     macros::format_description,
     OffsetDateTime,
 };
+use tokio::io::{
+    BufReader, AsyncBufReadExt,
+};
 
 static CANNED_HEAD:   &str = include_str!("response_files/canned_head.html");
 static CANNED_MIDDLE: &str = include_str!("response_files/canned_middle.html");
@@ -26,6 +29,8 @@ static INDEX_HEAD:   &str = include_str!("response_files/autoindex_head.html");
 static INDEX_MIDDLE: &str = include_str!("response_files/autoindex_middle.html");
 static INDEX_FOOT:   &str = include_str!("response_files/autoindex_foot.html");
 //static INDEX_BASE_RESPONSE_LEN: usize = INDEX_HEAD.len() + INDEX_MIDDLE.len() + INDEX_FOOT.len();
+
+static BUFFER_SIZE: usize = 4096;
 
 static INDEX_TIME_FMT: &[FormatItem] = format_description!(
     "[year]-[month]-[day] [hour]:[minute]:[second]"

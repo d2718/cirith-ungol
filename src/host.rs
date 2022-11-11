@@ -14,6 +14,7 @@ use std::{
     time::SystemTime,
 };
 
+use futures_util::{FutureExt, StreamExt};
 use hyper::{body, Body,
     header,
     header::{HeaderName, HeaderValue},
@@ -25,8 +26,17 @@ use time::{
     format_description::well_known::Rfc2822,
 };
 use tokio::{
-    io::AsyncWriteExt,
+    fs::File,
+    io::{
+        AsyncRead, AsyncReadExt, AsyncBufReadExt,
+        AsyncWriteExt,
+        BufReader, BufWriter,
+    },
     process::Command,
+};
+use tokio_util::{
+    io::{ReaderStream, StreamReader},
+    //compat::TokioAsyncReadCompatExt,
 };
 
 use crate::{
@@ -75,6 +85,76 @@ fn responsify(bytes: &[u8]) -> Result<Response<Body>, String> {
     }
 
     Ok(resp)
+}
+
+async fn make_body_stream<P>(p: P) -> Result<Body, std::io::Error>
+where
+    P: AsRef<Path>,
+{
+    let p = p.as_ref();
+    log::trace!("make_body_stream( {:?} ) called.", p);
+
+    let f = File::open(p).await?;
+    let rs = ReaderStream::new(f);
+    let bod = Body::wrap_stream(rs);
+    Ok(bod)
+}
+
+async fn cgi_reparse_response<R>(r: R) -> Result<Response<Body>, String>
+where R: AsyncRead + Send + Unpin + 'static
+{
+    let mut reader = BufReader::new(r);
+    let mut resp = Response::builder()
+        .status(StatusCode::OK);
+    let mut buff = String::new();
+
+    match reader.read_line(&mut buff).await {
+        Ok(0) => { return Err("CGI script produced no output!".to_owned()); },
+        Err(e) => { return Err(format!("Error reading from output: {}", &e)); },
+        Ok(_) => {/* This is what we want to happen. */},
+    }
+
+    while &buff != "\r\n" {
+        match buff.split_once(':') {
+            Some((name, value)) => {
+                resp = resp.header(name.trim(), value.trim());
+            },
+            None => {
+                return Err(format!("Invalid header line: {:?}", &buff));
+            },
+        }
+
+        buff.clear();
+        match reader.read_line(&mut buff).await {
+            Ok(0) => {
+                // Ok(0) here indicates that the R generating the response
+                // has produced only headers and no body. We're going to
+                // consider this a reasonable outcome and not throw an error.
+                break;
+            },
+            Err(e) => { return Err(format!("Error reading from output: {}", &e)); },
+            Ok(_) => { /* This is, again, the happy path. */ },
+        }
+    }
+
+    let rs = ReaderStream::new(reader);
+    let body = Body::wrap_stream(rs);
+    resp.body(body).map_err(|e| format!(
+        "Error generating CGI response: {}", &e
+    ))
+}
+
+async fn read_child_stderr<R>(mut r: R) -> Result<String, String>
+where R: AsyncRead + Unpin
+{
+    let mut stderr = String::new();
+    if let Err(e) = r.read_to_string(&mut stderr).await {
+        return Err(format!(
+            "Error reading child process stderr: {}", &e
+        ));
+    }
+
+    Ok(stderr)
 }
 
 /// Values of the `Etag` and `Last-Modified` headers.
@@ -415,6 +495,152 @@ impl Host {
         }
     }
 
+    async fn new_cgi<P>(&self, p: P, mut req: Request<Body>) -> Response<Body>
+    where P: AsRef<Path>,
+    {
+        let p = p.as_ref();
+        log::trace!(
+            "Host[{}]::cgi( {}, [ Request ] ) called.",
+            &self.name, p.display()
+        );
+
+        let mut cmd = Command::new(p);
+        cmd.env_clear();
+        cmd.env("DOCUMENT_ROOT", &self.root);
+        // HTTPS
+        // TLS_VERSION
+        // TLS_CIPHER
+        match std::env::current_exe() {
+            Ok(path) => {
+                cmd.env("PATH", &path);
+            },
+            Err(e) => {
+                log::error!(
+                    "Error detecting current process path: {}", &e
+                );
+            },
+        };
+        if let Some(qstr) = req.uri().query() {
+            cmd.env("QUERY_STRING", qstr);
+        }
+
+        if let Some::<&SocketAddr>(addr) = req.extensions().get() {
+            let remote_ip = addr.ip().to_string();
+            cmd.env("REMOTE_ADDR", &remote_ip);
+            cmd.env("REMOTE_HOST", &remote_ip);
+            cmd.env("REMOTE_PORT", addr.port().to_string());
+        }
+        cmd.env("REQUEST_METHOD", req.method().as_str());
+        cmd.env("REQUEST_URI", req.uri().path());
+        cmd.env("SCRIPT_FILENAME", p);
+        cmd.env("SCRIPT_NAME", req.uri().path());
+        cmd.env("SERVER_SOFTWARE", &*SERVER);
+        // SERVER_NAME
+        // SERVER_PORT
+        for (name, value) in req.headers().iter() {
+            let var_name: String = format!("HTTP_{}", name)
+                .chars().map(|c| {
+                    if c.is_ascii_alphabetic() {
+                        c.to_ascii_uppercase()
+                    } else if c == '-' {
+                        '_'
+                    } else {
+                        c
+                    }
+                }).collect();
+            let var_val = OsStr::from_bytes(value.as_bytes());
+            cmd.env(var_name, var_val);
+        }
+
+        let stdin_type = match req.method() {
+            &Method::POST => Stdio::piped(),
+            _ => Stdio::null(),
+        };
+        cmd.stdin(stdin_type);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                log::error!(
+                    "Error launching CGI process {}: {}", p.display(), &e
+                );
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+        };
+
+        if let Some(mut handle) = child.stdin.take() {
+            let mut child_input = BufWriter::new(handle);
+            let mut output_reader = StreamReader::new(
+                req.body_mut().map(|x| match x {
+                    Ok(chunk) => Ok(chunk),
+                    Err(e) => Err(
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("{}", &e)
+                        )
+                    ),
+                })
+            );
+            let mut request_output = BufReader::new(output_reader);
+
+            if let Err(e) = tokio::io::copy(
+                &mut request_output,
+                &mut child_input
+            ).await {
+                log::error!(
+                    "Error writing request body to CGI program {}: {}",
+                    p.display(), &e
+                );
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+            };
+        }
+
+        let mut handle = match child.stdout.take() {
+            Some(handle) => handle,
+            None => { 
+                log::error!("Unable to get a handle on child process stdout.");
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+        };
+        let mut stderr = match child.stderr.take() {
+            Some(handle) => handle,
+            None => {
+                log::error!("Unable to get a handle on child process stderr.");
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+            },
+        };
+
+        let (resp, exit_status, stderr) = match tokio::try_join!(
+            cgi_reparse_response(handle),
+            child.wait().map(|x| match x {
+                Ok(f) => Ok(f),
+                Err(e) => Err(format!("{}", &e)),
+            }),
+            read_child_stderr(stderr),
+        ) {
+            Ok((b, e, s)) => (b, e, s),
+            Err(e) => {
+                log::error!(
+                    "Error running CGI program {:?}: {}",
+                    p.display(), &e
+                );
+                return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+        if !exit_status.success() {
+            log::error!(
+                "Error running CGI program {:?}: {}\nStderr Output:\n{}",
+                p.display(), &exit_status, &stderr
+            );
+            return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        resp
+    }
+
     async fn handle(&self, req: Request<Body>) -> Response<Body> {
         log::trace!(
             "Host[{}]::handle( ... ) called. URI: {}",
@@ -533,40 +759,29 @@ impl Host {
             None => HeaderValue::from_static("application/octet-stream"),
         };
 
-        match tokio::fs::read(&local_path).await {
-            Ok(bytes) => {
-                let content_length = bytes.len();
-                let bod = Body::from(bytes);
+        match make_body_stream(&local_path).await {
+            Ok(bod) => match Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, metadata.len())
+                .body(bod)
+            {
+                Ok(mut resp) => {
+                    if let Bandwidth::Modified(bw_heads) = bandwidth {
+                        resp.headers_mut().insert(
+                            header::ETAG, bw_heads.etag
+                        );
+                        resp.headers_mut().insert(
+                            header::LAST_MODIFIED, bw_heads.modified
+                        );
+                    }
 
-                let mut resp = match Response::builder()
-                    .status(StatusCode::OK)
-                    .header(
-                        header::CONTENT_TYPE,
-                        content_type
-                    ).header(
-                        header::CONTENT_LENGTH,
-                        content_length
-                    ).body(bod)
-                {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        log::error!("Error generating response: {}", &e);
-                        return canned_html_response(500);
-                    },
-                };
-
-                if let Bandwidth::Modified(bw_heads) = bandwidth {
-                    resp.headers_mut().insert(
-                        header::ETAG,
-                        bw_heads.etag,
-                    );
-                    resp.headers_mut().insert(
-                        header::LAST_MODIFIED,
-                        bw_heads.modified,
-                    );
-                }
-
-                resp
+                    resp
+                },
+                Err(e) => {
+                    log::error!("Error generating response: {}", &e);
+                    return canned_html_response(StatusCode::INTERNAL_SERVER_ERROR);
+                },
             },
             Err(e) => match e.kind() {
                 ErrorKind::NotFound => canned_html_response(404),

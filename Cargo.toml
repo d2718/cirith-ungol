@@ -1,6 +1,6 @@
 [package]
 name = "cirith-ungol"
-version = "0.3.6"
+version = "0.4.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -23,7 +23,7 @@ time = { version = "^0.3", features = ["formatting", "macros", "parsing"] }
 tls-listener = { version = "^0.5", features = ["hyper-h1", "hyper-h2", "rustls"] }
 tokio-rustls = "^0.23"
 tokio = { version = "^1.2", features = ["fs", "macros", "net", "process", "rt"] }
-#tokio-util = { version = "^0.7", features = ["io"] }
+tokio-util = { version = "^0.7", features = ["compat", "io"] }
 toml = "^0.5"
 tower = { version = "^0.4", features = ["make", "util"] }
 tower-http = { version = "^0.3", features = ["add-extension", "cors", "set-header"] }
