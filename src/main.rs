@@ -1,28 +1,21 @@
-use std::{convert::Infallible, error::Error, net::SocketAddr, sync::Arc};
+use std::{
+    convert::Infallible,
+    error::Error,
+    net::SocketAddr, sync::Arc
+};
 
 use futures_util::stream::StreamExt;
 use hyper::{
     header,
     server::{accept, conn::AddrStream, Server},
     service::{make_service_fn, service_fn},
-    Body, Request, Response,
+    Body, Method, Request, Response,
 };
-use once_cell::sync::Lazy;
 use tokio_rustls::server::TlsStream;
 use tower::{Service, ServiceBuilder};
 use tower_http::{add_extension::AddExtensionLayer, set_header::response::SetResponseHeaderLayer};
 
-mod bl;
-mod conf;
-mod host;
-mod mime;
-mod rate;
-mod resp;
-mod rlog;
-mod tls;
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-static SERVER: Lazy<String> = Lazy::new(|| format!("Cirith Ungol v{}", VERSION));
+use cirith_ungol::*;
 
 async fn handle(req: Request<Body>) -> Result<Response<Body>, Box<dyn Error + Send + Sync>> {
     let hosts: &Arc<host::HostConfig> = req
@@ -31,7 +24,19 @@ async fn handle(req: Request<Body>) -> Result<Response<Body>, Box<dyn Error + Se
         .expect("Host configuration not being injected into requests.");
     let hosts = hosts.clone();
 
-    Ok(hosts.handle(req).await)
+    let meth = req.method().clone();
+    match hosts.handle(req).await {
+        Ok(response) => Ok(response),
+        Err(e) => {
+            if e.has_messages() {
+                log::error!("{}", &e);
+            }
+            match meth {
+                Method::GET | Method::POST => Ok(resp::html_body(e)),
+                _ => Ok(resp::no_body(e)),
+            }
+        },
+    }
 }
 
 fn init_logging(level: &str) {
@@ -80,6 +85,7 @@ fn drop_to_user(uname: Option<&str>) -> Result<(), String> {
         }
         drop_root::set_user_group(uname, uname)
             .map_err(|e| format!("Error dropping root privileges to user {:?}: {}", uname, &e))?;
+        log::info!("Serving files as user {:?}", uname);
     }
 
     Ok(())

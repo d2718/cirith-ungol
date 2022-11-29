@@ -35,6 +35,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::{
     mime::{MIME_TYPES, OCTET_STREAM},
+    CuErr,
     SERVER,
 };
 
@@ -83,11 +84,21 @@ static R_500: (&str, &str) = (
     <p>There was an error attempting to fetch the resource you requested.</p>",
 );
 
-pub fn canned_html_response<S>(code: S) -> Response<Body>
+static OTHER_BODY: &str =
+    "<h1>Error</h1>
+    <p>There was an error attempting to fetch your resource.</p>";
+
+pub fn canned_html_response<S>(
+    code: S,
+    mut addl_headers: Vec<(HeaderName, HeaderValue)>
+) -> Response<Body>
 where
     S: TryInto<StatusCode> + Debug + Copy,
 {
-    log::trace!("canned_html_response( {:?} ) called.", &code);
+    log::trace!(
+        "canned_html_response( {:?}, [{} headers] ) called. Headers:\n{:#?}",
+        &code, addl_headers.len(), &addl_headers
+    );
 
     let mut code: StatusCode = match code.try_into() {
         Ok(code) => code,
@@ -106,7 +117,7 @@ where
         StatusCode::INTERNAL_SERVER_ERROR => R_500,
         x => {
             log::warn!(
-                "resp::canned_html_response(): unsupported status code {:?}, using 500.",
+                "resp::html_body(): unsupported status code {:?}, using 500.",
                 &x
             );
             code = StatusCode::INTERNAL_SERVER_ERROR;
@@ -123,12 +134,51 @@ where
     v.write_all(contents.as_bytes()).unwrap();
     v.write_all(CANNED_FOOT.as_bytes()).unwrap();
 
-    Response::builder()
+    let mut resp_builder = Response::builder()
         .status(code)
         .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html"))
+        .header(header::CONTENT_LENGTH, HeaderValue::from(response_length));
+    for (name, value) in addl_headers.drain(..) {
+        resp_builder = resp_builder.header(name, value);
+    }
+    resp_builder.body(Body::from(v)).unwrap()
+}
+
+pub fn html_body(e: CuErr) -> Response<Body> {
+    log::trace!("html_body( ... ) called. {:#?}", &e);
+
+    let (title, contents) = match e.code() {
+        StatusCode::FORBIDDEN => R_403,
+        StatusCode::NOT_FOUND => R_404,
+        StatusCode::METHOD_NOT_ALLOWED => R_405,
+        StatusCode::PAYLOAD_TOO_LARGE => R_413,
+        StatusCode::TOO_MANY_REQUESTS => R_429,
+        StatusCode::INTERNAL_SERVER_ERROR => R_500,
+        x => match x.canonical_reason() {
+            Some(r) => (r, OTHER_BODY),
+            None => ("Unspecified Error", OTHER_BODY),
+        },
+    };
+
+    let response_length = CANNED_BASE_RESPONSE_LEN + title.len() + contents.len();
+    let mut v: Vec<u8> = Vec::with_capacity(response_length);
+
+    v.write_all(CANNED_HEAD.as_bytes()).unwrap();
+    v.write_all(title.as_bytes()).unwrap();
+    v.write_all(CANNED_MIDDLE.as_bytes()).unwrap();
+    v.write_all(contents.as_bytes()).unwrap();
+    v.write_all(CANNED_FOOT.as_bytes()).unwrap();
+
+    e.to_response()
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html"))
         .header(header::CONTENT_LENGTH, HeaderValue::from(response_length))
-        .body(Body::from(v))
-        .unwrap()
+        .body(Body::from(v)).unwrap()
+}
+
+pub fn no_body(e: CuErr) -> Response<Body> {
+    log::trace!("no_body( ... ) called. {:#?}", &e);
+
+    e.to_response().body(Body::empty()).unwrap()
 }
 
 pub fn header_only<S>(code: S, mut addl_headers: Vec<(HeaderName, HeaderValue)>) -> Response<Body>
@@ -416,7 +466,7 @@ pub fn respond_dir_index<P>(
     uri_path: &str,
     local_path: P,
     mut addl_headers: Vec<(HeaderName, HeaderValue)>,
-) -> Result<Response<Body>, String>
+) -> Result<Response<Body>, CuErr>
 where
     P: AsRef<Path>,
 {
@@ -484,10 +534,10 @@ where
         Ok(body) => body,
         Err(e) => match e.kind() {
             ErrorKind::NotFound => {
-                return Ok(canned_html_response(StatusCode::NOT_FOUND));
+                return Ok(canned_html_response(StatusCode::NOT_FOUND, vec![]));
             }
             ErrorKind::PermissionDenied => {
-                return Ok(canned_html_response(StatusCode::FORBIDDEN));
+                return Ok(canned_html_response(StatusCode::FORBIDDEN, vec![]));
             }
             _ => {
                 return Err(format!("Error generating body: {}", &e));
@@ -575,7 +625,7 @@ pub async fn cgi<P>(
     p: P,
     mut req: Request<Body>,
     document_root: &Path,
-) -> Result<Response<Body>, String>
+) -> Result<Response<Body>, CuErr>
 where
     P: AsRef<Path>,
 {
@@ -687,6 +737,6 @@ where
             "process returned unsuccessful exit status: {}\nStderr Output:\n{}",
             &exit_status, &stderr
         );
-        Err(estr)
+        Err(CuErr::from(estr))
     }
 }

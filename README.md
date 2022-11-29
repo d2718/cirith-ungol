@@ -115,38 +115,41 @@ sudo nohup cirith-ungol >run.log &
 
 ## To Do
 
-  * ~~Make logging optional.~~ Logging can now be controlled by setting
-    the `CU_LOG` environment variable to one of the following values:
-    `max`, `trace`, `debug`, `info`, `warn`, `error`, `off`. The default
-    level is `info`; `max` is equivalent to `trace`.
-  * more command line arguments (and maybe look for config file in a few
-    common places)
-  * ~~request rate limiting~~
-  * ~~maybe per-IP rate limiting~~
-  * ~~directory autoindexing~~
-  * ~~ETags~~ Also serves `Last-Modified` header, and responds appropriately
-    to requests with `If-None-Match` and `If-Modified-Since` headers.
-  * ~~CORS layer (pretty sure this is just a matter of adding an existing
-    [`tower`](https://github.com/tower-rs/tower) Service)~~
-  * ~~configurable CORS layer (it is, in fact, a pretty simple `tower` layer)~~
-    Server-wide CORS policy is configurable by choosing a base policy
-    ("none", "restrictive", "permissive" [default], "very") and optionally
-    customizing some of the header values.
-  * custom error pages?
-  * more complete set of environment variables passed through CGI
-  * custom MIME type configuration
-  * ~~streaming response bodies~~ The bodies of static files and CGI output
-    both stream. Directory indices don't yet, but they may not need to,
-    because those chunks of HTML shouldn't ever be particularly huge.
-  * Respond to RANGE and HEAD requests.
-  * Compression (Respond to `Accept-Encoding` header.)
-  * Squash a bunch of the `tower::Layer`s together into a single layer to
-    reduce async runtime complexity.
+  * [x] ~~Make logging optional.~~ Logging can now be controlled by setting
+        the `CU_LOG` environment variable to one of the following values:
+        `max`, `trace`, `debug`, `info`, `warn`, `error`, `off`. The default
+        level is `info`; `max` is equivalent to `trace`.
+  * [ ] more command line arguments (and maybe look for config file in a few
+        common places)
+  * [x] ~~request rate limiting~~
+  * [x] ~~maybe per-IP rate limiting~~
+  * [x] ~~directory autoindexing~~
+  * [x] ~~ETags~~ Also serves `Last-Modified` header, and responds
+        appropriately to requests with `If-None-Match` and
+        `If-Modified-Since` headers.
+  * [x] ~~CORS layer (pretty sure this is just a matter of adding an existing
+        [`tower`](https://github.com/tower-rs/tower) Service)~~
+  * [x] ~~configurable CORS layer (it is, in fact, a pretty simple `tower`
+        layer)~~ Server-wide CORS policy is configurable by choosing a base
+        policy ("none", "restrictive", "permissive" [default], "very") and
+        optionally customizing some of the header values.
+  * [ ] custom error pages?
+  * [ ] more complete set of environment variables passed through CGI
+  * [ ] custom MIME type configuration
+  * [x] ~~streaming response bodies~~ The bodies of static files and CGI
+        output both stream. Directory indices don't yet, but they may not
+        need to, because those chunks of HTML shouldn't ever be particularly
+        huge.
+  * [ ] Respond to RANGE requests.
+  * [ ] Respond to HEAD requests.
+  * [ ] Compression (Respond to `Accept-Encoding` header.)
+  * [ ] Squash a bunch of the `tower::Layer`s together into a single layer to
+        reduce async runtime complexity.
 
 ## Goals
 
 Cirith Ungol aims to be simple to configure and relatively lightweight by
 targeting a specifc use case: A general purpose web server for serving static
-files and running CGI scripts from a small virtual machine, like a t2.micro or
-Google's e2-micro. It's intended for personal or experimental low-traffic
-websites.
+files and running CGI scripts from a small virtual machine, like an AWS
+t2.micro or Google's e2-micro. It's intended for personal or experimental
+low-traffic websites.
