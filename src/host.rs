@@ -5,14 +5,14 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     ops::Deref,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
-use hyper::{header, header::HeaderValue, Body, Method, Request, Response, StatusCode, Uri};
+use hyper::{header, header::HeaderValue, Body, Method, Request, StatusCode, Uri};
 
 use crate::{
     resp,
-    resp::{canned_html_response, cgi, header_only, respond_dir_index, respond_static_file},
+    resp::{cgi, header_only, respond_dir_index, respond_static_file},
     CuErr, Output,
 };
 
@@ -126,6 +126,25 @@ impl Host {
         )
     }
 
+    fn can_cgi(&self, local_path: &Path, method: &Method) -> Result<bool, CuErr> {
+        if let (Some(cgi_dirs), Some(p)) = (&self.cgi_dirs, local_path.parent()) {
+            if cgi_dirs.contains(p) {
+                if !matches!(method, &Method::GET | &Method::POST) {
+                    return Err(
+                        CuErr::from(StatusCode::METHOD_NOT_ALLOWED)
+                            .with_header(
+                                header::ALLOW,
+                                HeaderValue::from_static("GET, POST"),
+                            )
+                    );
+                }
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     async fn handle(&self, req: Request<Body>) -> Output {
         log::trace!(
             "Host[{}]::handle( ... ) called. URI: {}",
@@ -135,33 +154,21 @@ impl Host {
 
         let mut local_path = self.to_local_path(req.uri())?;
 
-        if let Some(cgi_dirs) = &self.cgi_dirs {
-            if let Some(p) = local_path.parent() {
-                if cgi_dirs.contains(p) {
-                    if !matches!(req.method(), &Method::GET | &Method::POST) {
-                        let e = CuErr::from(StatusCode::METHOD_NOT_ALLOWED)
-                            .with_header(
-                                header::ALLOW,
-                                HeaderValue::from_static("GET, POST"),
-                            );
-                        return Err(e);
-                    }
-
-                    return cgi(&local_path, req, &self.root).await.map_err(|e|
-                        e.wrap(format!(
-                            "error running CGI program {}", local_path.display()
-                        )));
-                }
-            }
+        if self.can_cgi(&local_path, req.method())? {
+            return cgi(&local_path, req, &self.root).await.map_err(|e|
+                e.wrap(format!(
+                    "error running CGI program {}", local_path.display()
+                )));
         }
 
         if !matches!(req.method(), &Method::GET | &Method::HEAD) {
-            let e = CuErr::from(StatusCode::METHOD_NOT_ALLOWED)
-                .with_header(
-                    header::ALLOW,
-                    HeaderValue::from_static("GET, HEAD")
-                );
-            return Err(e);
+            return Err(
+                CuErr::from(StatusCode::METHOD_NOT_ALLOWED)
+                    .with_header(
+                        header::ALLOW,
+                        HeaderValue::from_static("GET, HEAD")
+                    )
+            );
         }
 
         let mut metadata = std::fs::metadata(&local_path).map_err(|e|
@@ -209,7 +216,7 @@ impl Host {
                             md
                         }
                         _ => {
-                            return respond_dir_index(req.uri().path(), &local_path, vec![]);
+                            return respond_dir_index(&local_path, metadata, req);
                         },
                     }
                 }
@@ -217,7 +224,7 @@ impl Host {
                     return Err(CuErr::from(StatusCode::NOT_FOUND));
                 }
                 Index::Auto => {
-                    return respond_dir_index(req.uri().path(), &local_path, vec![]);
+                    return respond_dir_index(&local_path, metadata, req);
                 },
             }
         }

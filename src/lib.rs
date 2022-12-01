@@ -8,7 +8,7 @@ pub mod rlog;
 pub mod tls;
 
 use hyper::{
-    Body, Request, Response, StatusCode,
+    Body, Response, StatusCode,
     header::{HeaderName, HeaderValue},
 };
 use once_cell::sync::Lazy;
@@ -110,7 +110,7 @@ impl From<StatusCode> for CuErr {
 impl std::fmt::Display for CuErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Returning error {}", &self.code)?;
-        for (name, val) in self.headers.iter() {
+        for (name, val) in self.headers.iter().rev() {
             writeln!(f, "    {}: {:?}", name, val)?;
         }
         for msg in self.messages.iter() {

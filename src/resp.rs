@@ -28,7 +28,14 @@ use time::{
 };
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, BufWriter},
+    io::{
+        AsyncBufReadExt,
+        AsyncRead,
+        AsyncReadExt,
+        AsyncSeekExt,
+        BufReader,
+        BufWriter,
+    },
     process::Command,
 };
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -36,6 +43,7 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use crate::{
     mime::{MIME_TYPES, OCTET_STREAM},
     CuErr,
+    Output,
     SERVER,
 };
 
@@ -301,7 +309,7 @@ impl Bandwidth {
             match HeaderValue::try_from(bytes.as_slice()) {
                 Ok(val) => val,
                 Err(e) => {
-                    log::error!("Error headerizing Etag value {:?}: {}", &bytes, &e);
+                    log::error!("unheaderizable Etag value {:?}: {}", &bytes, &e);
                     return Bandwidth::Unknown;
                 }
             }
@@ -313,9 +321,26 @@ impl Bandwidth {
             }
         }
 
+        let if_range = req.headers().get(header::IF_RANGE);
+        if let Some(val) = if_range {
+            if val == etag {
+                return Bandwidth::NotModified;
+            }
+        }
+
         let last_modified = OffsetDateTime::from(last_modified);
 
         if let Some(val) = req.headers().get(header::IF_MODIFIED_SINCE) {
+            if let Ok(val) = val.to_str() {
+                if let Ok(last) = OffsetDateTime::parse(val, &Rfc2822) {
+                    if last_modified <= last {
+                        return Bandwidth::NotModified;
+                    }
+                }
+            }
+        }
+
+        if let Some(val) = if_range {
             if let Ok(val) = val.to_str() {
                 if let Ok(last) = OffsetDateTime::parse(val, &Rfc2822) {
                     if last_modified <= last {
@@ -463,34 +488,49 @@ fn write_index(uri_path: &str, p: &Path) -> Result<Vec<u8>, std::io::Error> {
 }
 
 pub fn respond_dir_index<P>(
-    uri_path: &str,
     local_path: P,
-    mut addl_headers: Vec<(HeaderName, HeaderValue)>,
-) -> Result<Response<Body>, CuErr>
+    metadata: Metadata,
+    req: Request<Body>,
+) -> Output
 where
     P: AsRef<Path>,
 {
     let p = local_path.as_ref();
     log::trace!(
-        "respond_dir_index( {}, [ {} add'l headers ] ) called.",
+        "respond_dir_index( {}, [ Metadata ], [ Request {:?} ] ) called.",
         p.display(),
-        addl_headers.len()
+        req.method(),
     );
 
+    let bandwidth = Bandwidth::check(&metadata, &req);
+    if Bandwidth::NotModified == bandwidth {
+        return Ok(header_only(StatusCode::NOT_MODIFIED, vec![]));
+    }
+
     let index_bytes =
-        write_index(uri_path, p).map_err(|e| format!("Error writing response: {}", &e))?;
+        write_index(req.uri().path(), p).map_err(|e| format!(
+            "error generating index: {}", &e
+        ))?;
     let mut resp = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, HeaderValue::from_static("text/html"))
         .header(header::CONTENT_LENGTH, HeaderValue::from(index_bytes.len()))
-        .body(Body::from(index_bytes))
-        .map_err(|e| format!("Error building response: {}", &e))?;
-
-    for (name, val) in addl_headers.drain(..) {
-        resp.headers_mut().insert(name, val);
+        .header(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+    
+    if req.method() == &Method::HEAD {
+        return Ok(header_only(StatusCode::OK, vec![]));
     }
 
-    Ok(resp)
+    if let Bandwidth::Modified(bw) = bandwidth {
+        resp = resp
+            .header(header::ETAG, bw.etag)
+            .header(header::LAST_MODIFIED, bw.modified);
+    }
+
+    resp.body(Body::from(index_bytes))
+        .map_err(|e| CuErr::from(format!(
+            "error building response: {}", &e
+        )))
 }
 
 async fn make_body_stream<P>(p: P) -> Result<Body, std::io::Error>
@@ -506,11 +546,35 @@ where
     Ok(bod)
 }
 
+/**
+This is here because it will eventually be used to respond to requests with
+specified ranges.
+*/
+#[allow(dead_code)]
+async fn make_chunk_stream<P>(
+    p: P,
+    start: u64,
+    length: u64
+) -> Result<Body, std::io::Error>
+where P: AsRef<Path>,
+{
+    use std::io::SeekFrom;
+
+    let p = p.as_ref();
+    log::trace!("make_chunk_stream( {:?}, {}, {} ) called.", p, start, length);
+
+    let mut f = File::open(p).await?;
+    f.seek(SeekFrom::Start(start)).await?;
+    let rs = ReaderStream::new(f.take(length));
+    let bod = Body::wrap_stream(rs);
+    Ok(bod)
+}
+
 pub async fn respond_static_file<P>(
     local_path: P,
     metadata: Metadata,
     req: Request<Body>,
-) -> Result<Response<Body>, String>
+) -> Output
 where
     P: AsRef<Path>,
 {
@@ -530,20 +594,12 @@ where
         None => &OCTET_STREAM,
     };
 
-    let body = match make_body_stream(p).await {
-        Ok(body) => body,
-        Err(e) => match e.kind() {
-            ErrorKind::NotFound => {
-                return Ok(canned_html_response(StatusCode::NOT_FOUND, vec![]));
-            }
-            ErrorKind::PermissionDenied => {
-                return Ok(canned_html_response(StatusCode::FORBIDDEN, vec![]));
-            }
-            _ => {
-                return Err(format!("Error generating body: {}", &e));
-            }
-        },
-    };
+    let body = make_body_stream(p).await
+        .map_err(|e| match e.kind() {
+            ErrorKind::NotFound => CuErr::from(StatusCode::NOT_FOUND),
+            ErrorKind::PermissionDenied => CuErr::from(StatusCode::FORBIDDEN),
+            _ => CuErr::from(format!("error generating body stream: {}", &e)),
+        })?;
 
     let mut resp = Response::builder()
         .status(StatusCode::OK)
@@ -557,23 +613,27 @@ where
     }
 
     resp.body(body)
-        .map_err(|e| format!("Error generating Response: {}", &e))
+        .map_err(|e| CuErr::from(format!("error generating Response: {}", &e)))
 }
 
-async fn cgi_reparse_response<R>(r: R) -> Result<Response<Body>, String>
+async fn cgi_reparse_response<R>(r: R) -> Output
 where
     R: AsyncRead + Send + Unpin + 'static,
 {
     let mut reader = BufReader::new(r);
-    let mut resp = Response::builder().status(StatusCode::OK);
+    let mut resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
     let mut buff = String::new();
 
     match reader.read_line(&mut buff).await {
         Ok(0) => {
-            return Err("CGI script produced no output!".to_owned());
+            return Err(CuErr::from("subprocess produced no output."));
         }
         Err(e) => {
-            return Err(format!("Error reading from output: {}", &e));
+            return Err(CuErr::from(
+                format!("error reading subprocess output: {}", &e
+            )));
         }
         Ok(_) => { /* This is what we want to happen. */ }
     }
@@ -584,7 +644,9 @@ where
                 resp = resp.header(name.trim(), value.trim());
             }
             None => {
-                return Err(format!("Invalid header line: {:?}", &buff));
+                return Err(CuErr::from(format!(
+                    "invalid header line: {:?}", &buff
+                )));
             }
         }
 
@@ -597,7 +659,9 @@ where
                 break;
             }
             Err(e) => {
-                return Err(format!("Error reading from output: {}", &e));
+                return Err(CuErr::from(format!(
+                    "error reading subprocess output: {}", &e
+                )));
             }
             Ok(_) => { /* This is, again, the happy path. */ }
         }
@@ -606,16 +670,18 @@ where
     let rs = ReaderStream::new(reader);
     let body = Body::wrap_stream(rs);
     resp.body(body)
-        .map_err(|e| format!("Error generating CGI response: {}", &e))
+        .map_err(|e| CuErr::from(format!(
+            "error building response: {}", &e
+        )))
 }
 
-async fn read_child_stderr<R>(mut r: R) -> Result<String, String>
+async fn read_child_stderr<R>(mut r: R) -> Result<String, CuErr>
 where
     R: AsyncRead + Unpin,
 {
     let mut stderr = String::new();
     if let Err(e) = r.read_to_string(&mut stderr).await {
-        return Err(format!("Error reading child process stderr: {}", &e));
+        return Err(CuErr::from(format!("{}", &e)));
     }
 
     Ok(stderr)
@@ -625,7 +691,7 @@ pub async fn cgi<P>(
     p: P,
     mut req: Request<Body>,
     document_root: &Path,
-) -> Result<Response<Body>, CuErr>
+) -> Output
 where
     P: AsRef<Path>,
 {
@@ -715,19 +781,22 @@ where
     let handle = child
         .stdout
         .take()
-        .ok_or("Unable to get a handle on child process stdout.")?;
+        .ok_or("unable to get a handle on child process stdout")?;
     let stderr = child
         .stderr
         .take()
-        .ok_or("Unable to get a handle on child process stderr.")?;
+        .ok_or("unable to get a handle on child process stderr")?;
 
     let (resp, exit_status, stderr) = tokio::try_join!(
         cgi_reparse_response(handle),
         child.wait().map(|x| match x {
             Ok(f) => Ok(f),
-            Err(e) => Err(format!("{}", &e)),
+            Err(e) => Err(CuErr::from(format!("{}", &e))),
         }),
-        read_child_stderr(stderr),
+        read_child_stderr(stderr).map(|x| match x {
+            Ok(stderr) => Ok(stderr),
+            Err(e) => Err(e.wrap("error reading child process stderr")),
+        })
     )?;
 
     if exit_status.success() {
