@@ -537,9 +537,8 @@ where
 
 fn content_range_header(
     limits: Option<(u64, u64)>,
-    metadata: &Metadata
+    filesize: u64
 ) -> Result<HeaderValue, CuErr> {
-    let filesize = metadata.len();
     log::trace!(
         "content_range_header( [ Metadata {} byte file ] ) called.",
         filesize
@@ -555,104 +554,145 @@ fn content_range_header(
     )))
 }
 
-/**
-If the request has a well-formed Range: header, return the offset and
-length of the requested range.
-*/
-fn parse_range(req: &Request<Body>, metadata: &Metadata)
--> Result<Option<(u64, u64)>, CuErr> {
-    let filesize = metadata.len();
-    log::trace!(
-        "parse_range( [ Request ], [ Metadata {} byte file ] )",
-        filesize
-    );
+#[derive(Debug, Clone, Copy)]
+struct ContentRange {
+    start: u64,
+    end: u64,
+    filesize: u64
+}
 
+impl ContentRange {
+    fn determine(
+        req: &Request<Body>,
+        metadata: &Metadata
+    ) -> Result<Option<ContentRange>, CuErr> {
+        let filesize: u64 = metadata.len();
+        log::trace!(
+            "ContentRange::determine( [ Request ], [ Metadata {} byte file ] ) called.",
+            filesize
+        );
 
-    let value_str = match req.headers().get(header::RANGE) {
-        Some(val) => HeaderValue::to_str(val).map_err(|e| format!(
-            "Range header unreadable: {}", &e
-        ))?.trim(),
-        None => { return Ok(None); }
-    };
+        if filesize == 0 {
+            return Err(CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE));
+        }
 
-    let ranges_str = match value_str.split_once('=') {
-        Some(("bytes", x)) => x.trim(),
-        _ => {
-            let cr_val = content_range_header(None, metadata)?;
-            return Err(
-                CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .with_header(header::CONTENT_RANGE, cr_val)
-            );
-        },
-    };
+        let value_str = match req.headers().get(header::RANGE) {
+            Some(val) => HeaderValue::to_str(val).map_err(|e| format!(
+                "Range header unreadable: {}", &e
+            ))?.trim(),
+            None => {
+                if filesize == 0 {
+                    return Err(CuErr::from(StatusCode::NO_CONTENT));
+                } else if filesize > MAX_BODY_SIZE {
+                    let rng = ContentRange {
+                        start: 0,
+                        end: MAX_BODY_SIZE - 1,
+                        filesize,
+                    };
+                    return Ok(Some(rng));
+                } else {
+                    return Ok(None);
+                }
+            },
+        };
 
-    match ranges_str.split_once('-') {
-        // Range: bytes 1234-
-        Some((n, "")) => {
-            let start_value: u64 = n.trim().parse()
-                .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
-
-            if start_value >= filesize {
-                let cr_val = content_range_header(None, metadata)?;
+        let ranges_str = match value_str.split_once('=') {
+            Some(("bytes", x)) => x.trim(),
+            _ => {
+                let cr_val = content_range_header(None, filesize)?;
                 return Err(
                     CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
                         .with_header(header::CONTENT_RANGE, cr_val)
                 );
-            }
+            },
+        };
 
-            let range_size = filesize - start_value;
-            return Ok(Some((start_value, range_size)));
-        },
-        // Range: bytes -1234
-        Some(("", n)) => {
-            let suffix_size: u64 = n.trim().parse()
-                .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
+        /*
+        If the client requests multiple ranges, we only intend to serve the
+        first one.
+        
+        If the header specifies more than one range, they should be separated
+        by commas. This line will limit what's parsed below to either
+        everything up to the first comma (if there is one), or the entire
+        header value.
 
-            if suffix_size > filesize {
-                let cr_val = content_range_header(None, metadata)?;
-                return Err(
-                    CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
-                        .with_header(header::CONTENT_RANGE, cr_val)
-                );
-            }
+        If the header is properly formed, this should limit what is parsed
+        below to exactly one range.
+        */
+        let ranges_str = ranges_str.split(',').next().unwrap_or(ranges_str);
 
-            let start_value = filesize - suffix_size;
-            return Ok(Some((start_value, suffix_size)));
-        },
-        // Range: bytes 1234-5678
-        Some((n, m)) => {
-            /*
-            If the client requests multiple ranges, we only want the first
-            one (that's the only one we're going to serve). If there is more
-            than one range specified in the header, they will be separated
-            by commas. This takes everything up to the first comma in `m`
-            (which should be the digits of the ending offset of the first
-            range), or just the whole string `m` if there aren't any commas.
-            */
-            let m = m.split(',').next().unwrap_or(m);
-            let (start_value, end_value) = match (
-                n.parse::<u64>(), m.parse::<u64>()
-            ) {
-                (Ok(i), Ok(j)) => (i, j),
-                _ => { return Err(CuErr::from(StatusCode::BAD_REQUEST)); },
-            };
+        match ranges_str.split_once('_') {
+            // case of, e.g., "Range: 1234-"
+            Some((n, "")) => {
+                let start: u64 = n.trim().parse()
+                    .map_err(|e| CuErr::from(StatusCode::BAD_REQUEST))?;
+                if start >= filesize {
+                    let cr_val = content_range_header(None, filesize)?;
+                    return Err(
+                        CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .with_header(header::CONTENT_RANGE, cr_val)
+                    );
+                }
 
-            if end_value >= start_value || end_value > filesize
-            {
-                let cr_val = content_range_header(None, metadata)?; 
-                return Err(
-                    CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
-                        .with_header(header::CONTENT_RANGE, cr_val)
-                );
-            }
+                let mut range_size = filesize - start;
+                if range_size >  MAX_BODY_SIZE {
+                    range_size = MAX_BODY_SIZE;
+                }
+                let end = start + range_size - 1;
 
-            let range_size = end_value - start_value;
-            return Ok(Some((start_value, range_size)));
-        },
+                Ok(Some(ContentRange { start, end, filesize }))
+            },
+            // case of, e.g., "Range: -1234"
+            Some(("", n)) => {
+                let mut range_size: u64 = n.trim().parse()
+                    .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
+                if range_size > filesize {
+                    let cr_val = content_range_header(None, filesize)?;
+                    return Err(
+                        CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .with_header(header::CONTENT_RANGE, cr_val)
+                    );
+                }
 
-        _ => {
-            return Err(CuErr::from(StatusCode::BAD_REQUEST));
-        },
+                let start = filesize - range_size;
+                if range_size > MAX_BODY_SIZE {
+                    range_size = MAX_BODY_SIZE;
+                }
+                let end = start + range_size - 1;
+
+                Ok(Some(ContentRange { start, end, filesize }))
+            },
+            // case of, e.g., "Range: 1234-5678"
+            Some((n, m)) => {
+                let (start, mut end) : (u64, u64) = match (n.parse(), m.parse()) {
+                    (Ok(i), Ok(j)) => (i, j),
+                    _ => { return Err(CuErr::from(StatusCode::BAD_REQUEST)); },
+                };
+                if start > end || end >= filesize {
+                    let cr_val = content_range_header(None, filesize)?;
+                    return Err(
+                        CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                            .with_header(header::CONTENT_RANGE, cr_val)
+                    );
+                }
+
+                let mut range_size = end - start + 1;
+                if range_size > MAX_BODY_SIZE {
+                    range_size = MAX_BODY_SIZE
+                    end = start + range_size - 1;
+                }
+
+                Ok(Some(ContentRange { start, end, filesize }))
+            },
+
+            _ => {
+                Err(CuErr::from(StatusCode::BAD_REQUEST))
+            },
+        }
+    }
+
+    fn header(&self) -> Result<HeaderValue, CuErr> {
+        content_range_header(Some((self.start, self.end)), self.filesizefilesize)
     }
 }
 
@@ -680,15 +720,16 @@ specified ranges.
 #[allow(dead_code)]
 async fn make_chunk_stream<P>(
     p: P,
-    start: u64,
-    length: u64
+    rng: ContentRange,
 ) -> Result<Body, CuErr>
 where P: AsRef<Path>,
 {
     use std::io::SeekFrom;
 
     let p = p.as_ref();
-    log::trace!("make_chunk_stream( {:?}, {}, {} ) called.", p, start, length);
+    log::trace!("make_chunk_stream( {:?}, {:?} ) called.", p, &rng);
+
+    let length = rng.end - rng.start + 1;
 
     /*
     Error propagation from inside a BLOCK would be great if it were possible,
@@ -699,7 +740,7 @@ where P: AsRef<Path>,
     */
     let f = || async {
         let mut f = File::open(p).await?;
-        f.seek(SeekFrom::Start(start)).await?;
+        f.seek(SeekFrom::Start(rng.start)).await?;
         Ok(f)
     };
     let f = f().await.map_err(|e: std::io::Error| match e.kind() {
@@ -737,24 +778,9 @@ where
         None => &OCTET_STREAM,
     };
 
-    let parts: Option<(u64, u64)> = match parse_range(&req, &metadata)? {
-        Some((offset, length)) => {
-            if length > MAX_BODY_SIZE {
-                Some((offset, MAX_BODY_SIZE))
-            } else {
-                Some((offset, length))
-            }
-        }
-        None => {
-            if metadata.len() > MAX_BODY_SIZE {
-                Some((0, MAX_BODY_SIZE))
-            } else {
-                None
-            }
-        }
-    };
+    let content_range = ContentRange::determine(&req, &metadata)?;
 
-    let (resp, body) = match parts {
+    let (resp, body) = match content_range {
         None => {
             let body = make_body_stream(p).await?;
 
@@ -776,11 +802,10 @@ where
             (resp, body)
         },
         
-        Some((offset, length)) => {
-            let body = make_chunk_stream(p, offset, length).await?;
-            let cr_val = content_range_header(
-                Some((offset, offset+length)), &metadata
-            )?;
+        Some(content_range) => {
+            let body = make_chunk_stream(p, content_range).await?;
+            let cr_val = content_range.header()?;
+            let length = content_range.end - content_range.start + 1;
 
             let resp = Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
