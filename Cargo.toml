@@ -2,6 +2,7 @@
 name = "cirith-ungol"
 version = "0.5.1"
 edition = "2021"
+default-run = "cirith-ungol"
 
 [dependencies]
 drop-root = "^0.1"

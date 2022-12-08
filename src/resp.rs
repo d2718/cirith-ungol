@@ -47,6 +47,8 @@ use crate::{
     SERVER,
 };
 
+const MAX_BODY_SIZE: u64 = 1024 * 1024;
+
 static CANNED_HEAD: &str = include_str!("response_files/canned_head.html");
 static CANNED_MIDDLE: &str = include_str!("response_files/canned_middle.html");
 static CANNED_FOOT: &str = include_str!("response_files/canned_foot.html");
@@ -533,14 +535,139 @@ where
         )))
 }
 
-async fn make_body_stream<P>(p: P) -> Result<Body, std::io::Error>
+fn content_range_header(
+    limits: Option<(u64, u64)>,
+    metadata: &Metadata
+) -> Result<HeaderValue, CuErr> {
+    let filesize = metadata.len();
+    log::trace!(
+        "content_range_header( [ Metadata {} byte file ] ) called.",
+        filesize
+    );
+
+    let text = match limits {
+        Some((start, end)) => format!("bytes {}-{}/{}", start, end, filesize),
+        None => format!("bytes */{}", filesize),
+    };
+    HeaderValue::try_from(text).map_err(|_| CuErr::from(format!(
+        "unable to headerize Content-Range value for {} byte file",
+        filesize
+    )))
+}
+
+/**
+If the request has a well-formed Range: header, return the offset and
+length of the requested range.
+*/
+fn parse_range(req: &Request<Body>, metadata: &Metadata)
+-> Result<Option<(u64, u64)>, CuErr> {
+    let filesize = metadata.len();
+    log::trace!(
+        "parse_range( [ Request ], [ Metadata {} byte file ] )",
+        filesize
+    );
+
+
+    let value_str = match req.headers().get(header::RANGE) {
+        Some(val) => HeaderValue::to_str(val).map_err(|e| format!(
+            "Range header unreadable: {}", &e
+        ))?.trim(),
+        None => { return Ok(None); }
+    };
+
+    let ranges_str = match value_str.split_once('=') {
+        Some(("bytes", x)) => x.trim(),
+        _ => {
+            let cr_val = content_range_header(None, metadata)?;
+            return Err(
+                CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .with_header(header::CONTENT_RANGE, cr_val)
+            );
+        },
+    };
+
+    match ranges_str.split_once('-') {
+        // Range: bytes 1234-
+        Some((n, "")) => {
+            let start_value: u64 = n.trim().parse()
+                .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
+
+            if start_value >= filesize {
+                let cr_val = content_range_header(None, metadata)?;
+                return Err(
+                    CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .with_header(header::CONTENT_RANGE, cr_val)
+                );
+            }
+
+            let range_size = filesize - start_value;
+            return Ok(Some((start_value, range_size)));
+        },
+        // Range: bytes -1234
+        Some(("", n)) => {
+            let suffix_size: u64 = n.trim().parse()
+                .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
+
+            if suffix_size > filesize {
+                let cr_val = content_range_header(None, metadata)?;
+                return Err(
+                    CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .with_header(header::CONTENT_RANGE, cr_val)
+                );
+            }
+
+            let start_value = filesize - suffix_size;
+            return Ok(Some((start_value, suffix_size)));
+        },
+        // Range: bytes 1234-5678
+        Some((n, m)) => {
+            /*
+            If the client requests multiple ranges, we only want the first
+            one (that's the only one we're going to serve). If there is more
+            than one range specified in the header, they will be separated
+            by commas. This takes everything up to the first comma in `m`
+            (which should be the digits of the ending offset of the first
+            range), or just the whole string `m` if there aren't any commas.
+            */
+            let m = m.split(',').next().unwrap_or(m);
+            let (start_value, end_value) = match (
+                n.parse::<u64>(), m.parse::<u64>()
+            ) {
+                (Ok(i), Ok(j)) => (i, j),
+                _ => { return Err(CuErr::from(StatusCode::BAD_REQUEST)); },
+            };
+
+            if end_value >= start_value || end_value > filesize
+            {
+                let cr_val = content_range_header(None, metadata)?; 
+                return Err(
+                    CuErr::from(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .with_header(header::CONTENT_RANGE, cr_val)
+                );
+            }
+
+            let range_size = end_value - start_value;
+            return Ok(Some((start_value, range_size)));
+        },
+
+        _ => {
+            return Err(CuErr::from(StatusCode::BAD_REQUEST));
+        },
+    }
+}
+
+async fn make_body_stream<P>(p: P) -> Result<Body, CuErr>
 where
     P: AsRef<Path>,
 {
     let p = p.as_ref();
     log::trace!("make_body_stream( {:?} ) called.", p);
 
-    let f = File::open(p).await?;
+    let f = File::open(p).await.map_err(|e| match e.kind() {
+        ErrorKind::NotFound => CuErr::from(StatusCode::NOT_FOUND),
+        ErrorKind::PermissionDenied => CuErr::from(StatusCode::FORBIDDEN),
+        _ => CuErr::from(format!("error generating body stream: {}", &e)),
+    })?;
     let rs = ReaderStream::new(f);
     let bod = Body::wrap_stream(rs);
     Ok(bod)
@@ -555,7 +682,7 @@ async fn make_chunk_stream<P>(
     p: P,
     start: u64,
     length: u64
-) -> Result<Body, std::io::Error>
+) -> Result<Body, CuErr>
 where P: AsRef<Path>,
 {
     use std::io::SeekFrom;
@@ -563,8 +690,24 @@ where P: AsRef<Path>,
     let p = p.as_ref();
     log::trace!("make_chunk_stream( {:?}, {}, {} ) called.", p, start, length);
 
-    let mut f = File::open(p).await?;
-    f.seek(SeekFrom::Start(start)).await?;
+    /*
+    Error propagation from inside a BLOCK would be great if it were possible,
+    but it's not. So I make this next block into a closure, then immediately
+    call it and propagate _that_ error.
+
+    I have no idea about the performance implications of this.
+    */
+    let f = || async {
+        let mut f = File::open(p).await?;
+        f.seek(SeekFrom::Start(start)).await?;
+        Ok(f)
+    };
+    let f = f().await.map_err(|e: std::io::Error| match e.kind() {
+        ErrorKind::NotFound => CuErr::from(StatusCode::NOT_FOUND),
+        ErrorKind::PermissionDenied => CuErr::from(StatusCode::FORBIDDEN),
+        _ => CuErr::from(format!("error generating body stream: {}", &e)),
+    })?;
+
     let rs = ReaderStream::new(f.take(length));
     let bod = Body::wrap_stream(rs);
     Ok(bod)
@@ -594,26 +737,68 @@ where
         None => &OCTET_STREAM,
     };
 
-    let body = make_body_stream(p).await
-        .map_err(|e| match e.kind() {
-            ErrorKind::NotFound => CuErr::from(StatusCode::NOT_FOUND),
-            ErrorKind::PermissionDenied => CuErr::from(StatusCode::FORBIDDEN),
-            _ => CuErr::from(format!("error generating body stream: {}", &e)),
-        })?;
+    let parts: Option<(u64, u64)> = match parse_range(&req, &metadata)? {
+        Some((offset, length)) => {
+            if length > MAX_BODY_SIZE {
+                Some((offset, MAX_BODY_SIZE))
+            } else {
+                Some((offset, length))
+            }
+        }
+        None => {
+            if metadata.len() > MAX_BODY_SIZE {
+                Some((0, MAX_BODY_SIZE))
+            } else {
+                None
+            }
+        }
+    };
 
-    let mut resp = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CONTENT_LENGTH, metadata.len());
+    let (resp, body) = match parts {
+        None => {
+            let body = make_body_stream(p).await?;
 
-    if let Bandwidth::Modified(bw) = bandwidth {
-        resp = resp
-            .header(header::ETAG, bw.etag)
-            .header(header::LAST_MODIFIED, bw.modified);
-    }
+            let mut resp = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, metadata.len())
+                .header(
+                    header::ACCEPT_RANGES,
+                    HeaderValue::from_static("bytes"),
+                );
+            
+            if let Bandwidth::Modified(bw) = bandwidth {
+                resp = resp
+                    .header(header::ETAG, bw.etag)
+                    .header(header::LAST_MODIFIED, bw.modified);
+            }
 
-    resp.body(body)
-        .map_err(|e| CuErr::from(format!("error generating Response: {}", &e)))
+            (resp, body)
+        },
+        
+        Some((offset, length)) => {
+            let body = make_chunk_stream(p, offset, length).await?;
+            let cr_val = content_range_header(
+                Some((offset, offset+length)), &metadata
+            )?;
+
+            let resp = Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, length)
+                .header(header::CONTENT_RANGE, cr_val)
+                .header(
+                    header::ACCEPT_RANGES,
+                    HeaderValue::from_static("bytes"),
+                );
+            
+            (resp, body)
+        },
+    };
+
+    resp.body(body).map_err(|e| CuErr::from(format!(
+        "error building response: {}", &e
+    )))
 }
 
 async fn cgi_reparse_response<R>(r: R) -> Output
