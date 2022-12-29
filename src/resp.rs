@@ -47,7 +47,7 @@ use crate::{
     SERVER,
 };
 
-const MAX_BODY_SIZE: u64 = 1024 * 1024;
+//const MAX_BODY_SIZE: u64 = 1024 * 1024;
 
 static CANNED_HEAD: &str = include_str!("response_files/canned_head.html");
 static CANNED_MIDDLE: &str = include_str!("response_files/canned_middle.html");
@@ -583,13 +583,13 @@ impl ContentRange {
             None => {
                 if filesize == 0 {
                     return Err(CuErr::from(StatusCode::NO_CONTENT));
-                } else if filesize > MAX_BODY_SIZE {
+/*                 } else if filesize > MAX_BODY_SIZE {
                     let rng = ContentRange {
                         start: 0,
                         end: MAX_BODY_SIZE - 1,
                         filesize,
                     };
-                    return Ok(Some(rng));
+                    return Ok(Some(rng)); */
                 } else {
                     return Ok(None);
                 }
@@ -621,11 +621,11 @@ impl ContentRange {
         */
         let ranges_str = ranges_str.split(',').next().unwrap_or(ranges_str);
 
-        match ranges_str.split_once('_') {
+        match ranges_str.split_once('-') {
             // case of, e.g., "Range: 1234-"
             Some((n, "")) => {
                 let start: u64 = n.trim().parse()
-                    .map_err(|e| CuErr::from(StatusCode::BAD_REQUEST))?;
+                    .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
                 if start >= filesize {
                     let cr_val = content_range_header(None, filesize)?;
                     return Err(
@@ -633,18 +633,13 @@ impl ContentRange {
                             .with_header(header::CONTENT_RANGE, cr_val)
                     );
                 }
-
-                let mut range_size = filesize - start;
-                if range_size >  MAX_BODY_SIZE {
-                    range_size = MAX_BODY_SIZE;
-                }
-                let end = start + range_size - 1;
+                let end = filesize - 1;
 
                 Ok(Some(ContentRange { start, end, filesize }))
             },
             // case of, e.g., "Range: -1234"
             Some(("", n)) => {
-                let mut range_size: u64 = n.trim().parse()
+                let range_size: u64 = n.trim().parse()
                     .map_err(|_| CuErr::from(StatusCode::BAD_REQUEST))?;
                 if range_size > filesize {
                     let cr_val = content_range_header(None, filesize)?;
@@ -655,16 +650,13 @@ impl ContentRange {
                 }
 
                 let start = filesize - range_size;
-                if range_size > MAX_BODY_SIZE {
-                    range_size = MAX_BODY_SIZE;
-                }
-                let end = start + range_size - 1;
+                let end = filesize - 1;
 
                 Ok(Some(ContentRange { start, end, filesize }))
             },
             // case of, e.g., "Range: 1234-5678"
             Some((n, m)) => {
-                let (start, mut end) : (u64, u64) = match (n.parse(), m.parse()) {
+                let (start, end) : (u64, u64) = match (n.parse(), m.parse()) {
                     (Ok(i), Ok(j)) => (i, j),
                     _ => { return Err(CuErr::from(StatusCode::BAD_REQUEST)); },
                 };
@@ -676,23 +668,20 @@ impl ContentRange {
                     );
                 }
 
-                let mut range_size = end - start + 1;
-                if range_size > MAX_BODY_SIZE {
-                    range_size = MAX_BODY_SIZE
-                    end = start + range_size - 1;
-                }
-
                 Ok(Some(ContentRange { start, end, filesize }))
             },
 
             _ => {
-                Err(CuErr::from(StatusCode::BAD_REQUEST))
+                Err(
+                    CuErr::from(StatusCode::BAD_REQUEST)
+                        .wrap(format!("ranges_str: {:?}", ranges_str))
+                )
             },
         }
     }
 
     fn header(&self) -> Result<HeaderValue, CuErr> {
-        content_range_header(Some((self.start, self.end)), self.filesizefilesize)
+        content_range_header(Some((self.start, self.end)), self.filesize)
     }
 }
 
@@ -780,10 +769,10 @@ where
 
     let content_range = ContentRange::determine(&req, &metadata)?;
 
-    let (resp, body) = match content_range {
-        None => {
-            let body = make_body_stream(p).await?;
+    log::debug!("content_range:\n{:#?}", &content_range);
 
+    let resp = match content_range {
+        None => {
             let mut resp = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
@@ -799,15 +788,14 @@ where
                     .header(header::LAST_MODIFIED, bw.modified);
             }
 
-            (resp, body)
+            resp
         },
         
         Some(content_range) => {
-            let body = make_chunk_stream(p, content_range).await?;
             let cr_val = content_range.header()?;
             let length = content_range.end - content_range.start + 1;
 
-            let resp = Response::builder()
+            Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_LENGTH, length)
@@ -815,10 +803,17 @@ where
                 .header(
                     header::ACCEPT_RANGES,
                     HeaderValue::from_static("bytes"),
-                );
-            
-            (resp, body)
+                )
         },
+    };
+
+    let body = if req.method() == &Method::HEAD {
+        Body::empty()
+    } else {
+        match content_range {
+            None => make_body_stream(p).await?,
+            Some(content_range) => make_chunk_stream(p, content_range).await?
+        }
     };
 
     resp.body(body).map_err(|e| CuErr::from(format!(
