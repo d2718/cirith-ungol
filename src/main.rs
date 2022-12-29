@@ -55,6 +55,7 @@ fn init_logging(level: &str) {
     };
 
     let log_cfg = simplelog::ConfigBuilder::new()
+        .set_time_format_rfc3339()
         .add_filter_allow_str("cirith_ungol")
         .build();
 
